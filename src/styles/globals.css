@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-deep: #0f0f23;
+  --color-glass: rgba(30, 30, 60, 0.6);
+  --color-accent: #00ff88;
+  --color-warning: #ff6b35;
+  --color-info: #4ecdc4;
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #8888aa;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* 自定义滚动条 - 暗色细滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(136, 136, 170, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(136, 136, 170, 0.5);
+}
+
+/* 选中文字颜色 */
+::selection {
+  background: rgba(0, 255, 136, 0.2);
+  color: #00ff88;
+}
+
+/* 过渡动画基础 */
+@layer utilities {
+  .transition-base {
+    transition: all 200ms ease;
+  }
+
+  .transition-fast {
+    transition: all 150ms ease;
+  }
+
+  .transition-slow {
+    transition: all 300ms ease;
+  }
+
+  /* 毛玻璃效果工具类 */
+  .glass-effect {
+    background: rgba(30, 30, 60, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .glass-effect-light {
+    background: rgba(30, 30, 60, 0.4);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .glass-effect-strong {
+    background: rgba(30, 30, 60, 0.8);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+}
