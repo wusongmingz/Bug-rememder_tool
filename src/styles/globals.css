@@ -2,6 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * z-index 层级规范:
+ * 基础内容: z-0 (默认)
+ * Sidebar: z-10
+ * Sidebar tooltip: z-50
+ * 模态遮罩(overlay): z-40
+ * 模态面板(modal): z-50
+ * Toast提示: z-60
+ */
+
 :root {
   --color-deep: #0f0f23;
   --color-glass: rgba(30, 30, 60, 0.6);

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, Notification, screen, shell } = require('electron');
 const path = require('path');
 const Store = require('electron-store');
 const ZentaoAPI = require('./zentao-api');
@@ -16,8 +16,8 @@ const isDev = !app.isPackaged;
 function createWindow() {
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
 
-  const winWidth = 400;
-  const winHeight = 600;
+  const winWidth = 750;
+  const winHeight = 720;
 
   const savedPos = store.get('windowPosition', { x: -1, y: -1 });
   let x = savedPos.x >= 0 ? savedPos.x : screenWidth - winWidth - 20;
@@ -26,12 +26,13 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: winWidth,
     height: winHeight,
+    minWidth: 600,
     x: x,
     y: y,
     frame: false,
     transparent: true,
     alwaysOnTop: store.get('alwaysOnTop', true),
-    resizable: false,
+    resizable: true,
     skipTaskbar: true,
     hasShadow: false,
     webPreferences: {
@@ -233,9 +234,18 @@ ipcMain.handle('zentao:getAllBugs', async () => {
     return { success: false, error: '未连接禅道' };
   }
   try {
-    const bugs = await zentaoApi.getAllBugs();
-    console.log('[Main] zentao:getAllBugs 返回数量:', bugs.length);
-    return { success: true, bugs };
+    // 优先使用用户勾选的产品ID列表
+    const selectedProductIds = store.get('selectedProductIds', []);
+    let productIdParam;
+    if (selectedProductIds && selectedProductIds.length > 0) {
+      productIdParam = selectedProductIds;
+    } else {
+      // 回退到旧的productId字符串配置
+      productIdParam = store.get('productId', '');
+    }
+    const result = await zentaoApi.getAllBugs(productIdParam);
+    console.log('[Main] zentao:getAllBugs 返回数量:', result.bugs.length, 'usersMap大小:', Object.keys(result.usersMap).length);
+    return { success: true, bugs: result.bugs, usersMap: result.usersMap };
   } catch (err) {
     console.error('[Main] zentao:getAllBugs 失败:', err.message);
     return { success: false, error: err.message };
@@ -248,6 +258,19 @@ ipcMain.handle('zentao:disconnect', () => {
   zentaoApi = null;
   lastBugIds = new Set();
   return { success: true };
+});
+
+ipcMain.handle('zentao:getProductList', async () => {
+  if (!zentaoApi) {
+    return { success: false, error: '未连接禅道' };
+  }
+  try {
+    const products = await zentaoApi.getProductList();
+    return { success: true, products };
+  } catch (err) {
+    console.error('[Main] zentao:getProductList 失败:', err.message);
+    return { success: false, error: err.message };
+  }
 });
 
 // IPC处理 - electron-store
@@ -285,6 +308,38 @@ ipcMain.on('notification:show', (event, title, body) => {
   new Notification({ title, body, silent: false }).show();
 });
 
+// IPC处理 - 新Bug系统通知（支持点击跳转禅道）
+ipcMain.handle('zentao:showBugNotification', async (event, { title, body, bugId }) => {
+  const zentaoUrl = store.get('zentaoUrl', '');
+
+  const notifOptions = {
+    title: title || '新Bug提醒',
+    body: body || '',
+    urgency: 'normal',
+    silent: false,
+  };
+
+  const notification = new Notification(notifOptions);
+
+  notification.on('click', () => {
+    // 点击通知时打开禅道Bug详情
+    if (zentaoUrl && bugId) {
+      const bugUrl = `${zentaoUrl}/bug-view-${bugId}.html`;
+      shell.openExternal(bugUrl);
+    }
+    // 恢复窗口
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      if (!win.isVisible()) win.show();
+      win.focus();
+    }
+  });
+
+  notification.show();
+  return { success: true };
+});
+
 // 初始化禅道API（自动连接）
 function initZentaoApi() {
   const url = store.get('zentaoUrl');
@@ -302,6 +357,7 @@ function initZentaoApi() {
 
 // 应用启动
 app.whenReady().then(() => {
+  app.setAppUserModelId('com.bugwork.pixel-office');
   createWindow();
   createTray();
   initZentaoApi();

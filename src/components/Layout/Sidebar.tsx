@@ -1,4 +1,4 @@
-import { Bug, CheckSquare, Calendar, BarChart3, Settings } from 'lucide-react'
+import { Bug, CheckSquare, BarChart3, Settings } from 'lucide-react'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { ViewType } from '@/types'
 import { useState } from 'react'
@@ -8,7 +8,6 @@ import SettingsPanel from '@/components/Settings/SettingsPanel'
 const navItems: { icon: typeof Bug; view: ViewType; label: string }[] = [
   { icon: Bug, view: 'bugs', label: 'Bug 监控' },
   { icon: CheckSquare, view: 'todos', label: '待办事项' },
-  { icon: Calendar, view: 'calendar', label: '日历' },
   { icon: BarChart3, view: 'stats', label: '统计' },
 ]
 
@@ -20,7 +19,7 @@ export default function Sidebar() {
   return (
     <>
       <aside
-        className="relative flex flex-col items-center w-[60px] h-screen
+        className="relative z-10 flex flex-col items-center w-[60px] h-screen
           bg-[rgba(20,20,40,0.8)] backdrop-blur-md
           border-r border-[rgba(255,255,255,0.05)]"
       >

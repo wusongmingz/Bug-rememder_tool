@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   zentaoGetBugs: () => ipcRenderer.invoke('zentao:getBugs'),
   zentaoGetAllBugs: () => ipcRenderer.invoke('zentao:getAllBugs'),
   zentaoDisconnect: () => ipcRenderer.invoke('zentao:disconnect'),
+  zentaoGetProductList: () => ipcRenderer.invoke('zentao:getProductList'),
 
   // Store
   storeGet: (key) => ipcRenderer.invoke('store:get', key),
@@ -18,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Notification
   showNotification: (title, body) => ipcRenderer.send('notification:show', title, body),
+  zentaoShowBugNotification: (data) => ipcRenderer.invoke('zentao:showBugNotification', data),
 
   // 监听事件
   onBugsUpdated: (callback) => {

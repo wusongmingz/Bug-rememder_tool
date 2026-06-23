@@ -10,6 +10,7 @@ interface ElectronAPI {
   windowClose: () => Promise<void>
   windowTogglePin: () => Promise<void>
   notificationShow: (options: any) => Promise<void>
+  zentaoShowBugNotification?: (data: { title: string; body: string; bugId: number | string | null }) => Promise<{ success: boolean }>
   onBugsUpdated: (callback: (data: any) => void) => void
   onNewBugs: (callback: (bugs: any) => void) => void
   onApiError: (callback: (msg: string) => void) => void

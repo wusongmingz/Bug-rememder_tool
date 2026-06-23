@@ -4,7 +4,6 @@ import Sidebar from './Sidebar'
 import TodoPanel from '@/components/Todo/TodoPanel'
 import { ViewType } from '@/types'
 import BugDashboard from '@/components/Bug/BugDashboard'
-import CalendarView from '@/components/Calendar/CalendarView'
 import StatsPanel from '@/components/Stats/StatsPanel'
 
 // 占位页面组件
@@ -21,7 +20,6 @@ function PlaceholderPage({ title, icon }: { title: string; icon: string }) {
 const viewConfig: Record<ViewType, { title: string; icon: string }> = {
   bugs: { title: 'Bug Dashboard', icon: '🐛' },
   todos: { title: '待办事项', icon: '✅' },
-  calendar: { title: '日历视图', icon: '📅' },
   stats: { title: '数据统计', icon: '📊' },
 }
 
@@ -37,8 +35,6 @@ function renderView(view: ViewType) {
       return <BugDashboard />
     case 'todos':
       return <TodoPanel />
-    case 'calendar':
-      return <CalendarView />
     case 'stats':
       return <StatsPanel />
     default: {

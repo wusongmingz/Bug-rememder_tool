@@ -1,6 +1,25 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useBugStore } from '@/stores/bugStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { Bug, TeamMember } from '@/types'
+
+/** 确保当前用户在团队成员列表中，并标记 isCurrentUser */
+function ensureCurrentUserInList(members: TeamMember[], currentUsername: string): TeamMember[] {
+  if (!currentUsername) return members
+  // 找到当前用户（可能匹配 name 或 account）
+  const currentUserIndex = members.findIndex(m =>
+    m.name === currentUsername || m.account === currentUsername
+  )
+  if (currentUserIndex === -1) {
+    // 用户不在列表中（0个bug），手动添加到首位
+    const currentMember: TeamMember = { name: currentUsername, account: currentUsername, bugCount: 0, bugs: [], isCurrentUser: true }
+    return [currentMember, ...members]
+  }
+  // 标记当前用户并放到首位
+  const currentMember = { ...members[currentUserIndex], isCurrentUser: true }
+  const others = members.filter((_, i) => i !== currentUserIndex)
+  return [currentMember, ...others]
+}
 
 // severity 数字→字符串映射（与 zentao-api.js 保持一致）
 const SEVERITY_MAP: Record<number, Bug['severity']> = {
@@ -17,62 +36,45 @@ function mapSeverity(val: unknown): Bug['severity'] {
   return SEVERITY_MAP[Number(val)] || 'normal'
 }
 
+function normalizeStatus(rawStatus: unknown, bug: Record<string, unknown>): string {
+  const status = (rawStatus || '').toString().trim().toLowerCase()
+
+  if (status === 'active' || status === '激活') return 'active'
+  if (status === 'resolved' || status === '已解决') return 'resolved'
+  if (status === 'closed' || status === '已关闭') return 'closed'
+
+  if (!status) {
+    if (bug.resolvedDate || bug.resolvedBy || bug.resolution) return 'resolved'
+    return 'active'
+  }
+
+  return 'resolved'
+}
+
 /** 将API返回的原始bug数据映射为标准Bug类型 */
 function mapBugData(raw: Record<string, unknown>): Bug {
   return {
     id: Number(raw.id),
     title: (raw.title as string) || '',
     severity: mapSeverity(raw.severity),
-    status: (raw.status as string) || 'active',
+    status: normalizeStatus(raw.status, raw) as Bug['status'],
     assignedTo: (raw.assignedTo as string) || '',
+    assignedToRealName: (raw.assignedToRealName as string) || (raw.realname as string) || (raw.assignedTo as string) || '',
     createdDate: (raw.createdDate as string) || (raw.openedDate as string) || '',
     resolvedDate: (raw.resolvedDate as string) || (raw.closedDate as string) || undefined,
   }
 }
 
-// Mock数据（纯web开发模式使用）
-const mockBugs: Bug[] = [
-  { id: 1, title: '登录页面样式错位', severity: 'normal', status: 'active', assignedTo: '张三', createdDate: '2024-01-15' },
-  { id: 2, title: '数据导出内存溢出', severity: 'critical', status: 'active', assignedTo: '李四', createdDate: '2024-01-14' },
-  { id: 3, title: '权限校验绕过漏洞', severity: 'fatal', status: 'active', assignedTo: '王五', createdDate: '2024-01-13' },
-  { id: 4, title: '图表颜色建议优化', severity: 'suggestion', status: 'active', assignedTo: '赵六', createdDate: '2024-01-12' },
-  { id: 5, title: '搜索结果分页异常', severity: 'normal', status: 'resolved', assignedTo: '张三', createdDate: '2024-01-11', resolvedDate: '2024-01-14' },
-  { id: 6, title: '文件上传超时未处理', severity: 'critical', status: 'active', assignedTo: '李四', createdDate: '2024-01-10' },
-  { id: 7, title: '通知推送延迟严重', severity: 'normal', status: 'active', assignedTo: '王五', createdDate: '2024-01-09' },
-  { id: 8, title: '移动端适配问题', severity: 'normal', status: 'resolved', assignedTo: '赵六', createdDate: '2024-01-08', resolvedDate: '2024-01-12' },
-]
 
-// Mock团队数据（纯web开发模式使用）
-const mockTeamMembers: TeamMember[] = [
-  { name: '张三', bugCount: 3, bugs: [] },
-  { name: '李四', bugCount: 7, bugs: [] },
-  { name: '王五', bugCount: 1, bugs: [] },
-  { name: '赵六', bugCount: 5, bugs: [] },
-  { name: '孙七', bugCount: 9, bugs: [] },
-  { name: '周八', bugCount: 0, bugs: [] },
-]
-
-// Mock趋势数据
-function generateMockTrend() {
-  const data = []
-  const now = new Date()
-  for (let i = 6; i >= 0; i--) {
-    const date = new Date(now)
-    date.setDate(date.getDate() - i)
-    data.push({
-      date: `${date.getMonth() + 1}/${date.getDate()}`,
-      added: Math.floor(Math.random() * 5) + 1,
-      resolved: Math.floor(Math.random() * 4),
-    })
-  }
-  return data
-}
 
 interface ElectronAPI {
   zentaoConnect: (config: { url: string; username: string; password: string }) => Promise<{ success: boolean; error?: string }>
   zentaoGetBugs: () => Promise<{ success: boolean; bugs?: Record<string, unknown>[]; error?: string }>
-  zentaoGetAllBugs: () => Promise<{ success: boolean; bugs?: Record<string, unknown>[]; error?: string }>
+  zentaoGetAllBugs: () => Promise<{ success: boolean; bugs?: Record<string, unknown>[]; usersMap?: Record<string, string>; error?: string }>
   zentaoDisconnect: () => Promise<{ success: boolean }>
+  zentaoGetProductList?: () => Promise<{ success: boolean; products?: { id: number; name: string }[]; error?: string }>
+  zentaoShowBugNotification?: (data: { title: string; body: string; bugId: number | string | null }) => Promise<{ success: boolean }>
+  storeGet?: (key: string) => Promise<unknown>
   onBugsUpdated?: (callback: (data: { bugs: Record<string, unknown>[]; count: number }) => void) => void
   onNewBugs?: (callback: (bugs: Record<string, unknown>[]) => void) => void
   onApiError?: (callback: (msg: string) => void) => void
@@ -87,45 +89,11 @@ function getElectronAPI(): ElectronAPI | null {
 }
 
 export function useZentao(pollInterval = 60000) {
-  const { setBugs, setConnectionStatus, setLastFetched, addTrendPoint, setTeamMembers } = useBugStore()
+  const { setBugs, setConnectionStatus, setLastFetched, setTeamMembers } = useBugStore()
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isElectron = useRef(!!getElectronAPI())
-
-  // 初始化：加载mock数据或连接
-  useEffect(() => {
-    if (!isElectron.current) {
-      // 纯web开发模式，使用mock数据
-      setBugs(mockBugs)
-      setTeamMembers(mockTeamMembers)
-      setConnectionStatus('online')
-      setLastFetched(new Date().toLocaleTimeString())
-
-      const trendData = generateMockTrend()
-      trendData.forEach((point) => addTrendPoint(point))
-    } else {
-      // Electron模式：监听主进程推送的Bug更新事件
-      const api = getElectronAPI()
-      if (api) {
-        // 监听轮询推送的bug更新
-        api.onBugsUpdated?.((data) => {
-          console.log('[useZentao] 收到bugs-updated推送, 数量:', data.count)
-          if (data.bugs) {
-            const mapped = data.bugs.map(mapBugData)
-            setBugs(mapped)
-            setLastFetched(new Date().toLocaleTimeString())
-            setConnectionStatus('online')
-          }
-        })
-
-        // 监听API错误
-        api.onApiError?.((msg) => {
-          console.error('[useZentao] API错误:', msg)
-        })
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const autoConnectedRef = useRef(false)
 
   const fetchBugs = useCallback(async () => {
     const api = getElectronAPI()
@@ -137,7 +105,6 @@ export function useZentao(pollInterval = 60000) {
       console.log('[useZentao] zentaoGetBugs返回:', JSON.stringify(result).substring(0, 300))
 
       if (result && result.success && result.bugs) {
-        // IPC返回 { success: true, bugs: [...] }
         const mapped = result.bugs.map(mapBugData)
         console.log('[useZentao] 映射后Bug数量:', mapped.length)
         setBugs(mapped)
@@ -146,7 +113,6 @@ export function useZentao(pollInterval = 60000) {
       } else if (result && !result.success) {
         console.error('[useZentao] 获取Bug失败:', result.error)
         setConnectionStatus('offline')
-        // 自动重连：5秒后重试
         retryTimerRef.current = setTimeout(() => {
           fetchBugs()
         }, 5000)
@@ -154,7 +120,6 @@ export function useZentao(pollInterval = 60000) {
     } catch (err) {
       console.error('[useZentao] fetchBugs异常:', err)
       setConnectionStatus('offline')
-      // 自动重连：5秒后重试
       retryTimerRef.current = setTimeout(() => {
         fetchBugs()
       }, 5000)
@@ -162,27 +127,170 @@ export function useZentao(pollInterval = 60000) {
 
     // 同时获取团队Bug数据
     try {
+      console.log('[useZentao] fetchBugs: 开始获取团队Bug数据...')
       const allResult = await api.zentaoGetAllBugs()
-      if (allResult && allResult.success && allResult.bugs) {
+      console.log('[useZentao] fetchBugs: 团队数据结果:', allResult?.success, '数量:', allResult?.bugs?.length)
+      if (allResult && allResult.success && allResult.bugs && allResult.bugs.length > 0) {
         const allMapped = allResult.bugs.map(mapBugData)
-        // 按 assignedTo 分组
-        const memberMap = new Map<string, Bug[]>()
-        allMapped.forEach(bug => {
-          const name = bug.assignedTo || '未指派'
-          if (!memberMap.has(name)) memberMap.set(name, [])
-          memberMap.get(name)!.push(bug)
+        const uniqueBugs = [...new Map(allMapped.map(b => [b.id, b])).values()]
+
+        // 使用 usersMap 构建完整的团队成员列表
+        const usersMap: Record<string, string> = (allResult.usersMap as Record<string, string>) || {}
+        console.log('[useZentao] fetchBugs: usersMap大小:', Object.keys(usersMap).length)
+        const invalidAccounts = new Set(['', 'closed', 'guest', 'system', 'admin'])
+        const memberMap = new Map<string, { name: string; account: string; bugCount: number; bugs: Bug[] }>()
+
+        // 先从 usersMap 创建所有成员（即使没有bug也在列表中）
+        Object.entries(usersMap).forEach(([account, realName]) => {
+          if (invalidAccounts.has(account)) return
+          const name = (typeof realName === 'string' ? realName : (realName as unknown as { realname?: string })?.realname) || account
+          memberMap.set(account, { name, account, bugCount: 0, bugs: [] })
         })
-        const teamMembers: TeamMember[] = Array.from(memberMap.entries()).map(([name, bugs]) => ({
-          name,
-          bugCount: bugs.length,
-          bugs,
-        }))
+
+        // 然后统计每人的 active bug 数量
+        uniqueBugs.forEach(bug => {
+          const account = bug.assignedTo || ''
+          if (!account || account === '未指派') return
+          if (!memberMap.has(account)) {
+            // usersMap 中可能没有的人（例如已离职但还有bug）
+            memberMap.set(account, {
+              name: bug.assignedToRealName || account,
+              account,
+              bugCount: 0,
+              bugs: [],
+            })
+          }
+          const member = memberMap.get(account)!
+          if (bug.status === 'active') {
+            member.bugCount++
+            member.bugs.push(bug)
+          }
+        })
+
+        let teamMembers: TeamMember[] = Array.from(memberMap.values())
+        const currentUser = useSettingsStore.getState().username || (await api.storeGet?.('username') as string || '')
+        if (currentUser) {
+          teamMembers.sort((a, b) => b.bugCount - a.bugCount)
+          teamMembers = ensureCurrentUserInList(teamMembers, currentUser)
+        }
         setTeamMembers(teamMembers)
       }
     } catch (err) {
       console.log('[useZentao] 获取团队Bug失败(降级):', err)
     }
   }, [setBugs, setLastFetched, setConnectionStatus, setTeamMembers])
+
+  // 初始化：连接禅道（如果有保存的配置则自动重连）
+  useEffect(() => {
+    if (!isElectron.current) {
+      setConnectionStatus('offline')
+    } else {
+      const api = getElectronAPI()
+      if (api) {
+        // 监听轮询推送的bug更新
+        api.onBugsUpdated?.((data) => {
+          console.log('[useZentao] 收到bugs-updated推送, 数量:', data.count)
+          if (data.bugs) {
+            const mapped = data.bugs.map(mapBugData)
+            setBugs(mapped)
+            setLastFetched(new Date().toLocaleTimeString())
+            setConnectionStatus('online')
+          }
+
+          console.log('[useZentao] 开始获取团队Bug数据...')
+          api.zentaoGetAllBugs().then(async (allResult) => {
+            console.log('[useZentao] 团队数据结果:', allResult?.success, '数量:', allResult?.bugs?.length)
+            if (allResult && allResult.success && allResult.bugs && allResult.bugs.length > 0) {
+              const allMapped = allResult.bugs.map(mapBugData)
+              const uniqueBugs = [...new Map(allMapped.map(b => [b.id, b])).values()]
+
+              // 使用 usersMap 构建完整的团队成员列表
+              const usersMap: Record<string, string> = (allResult.usersMap as Record<string, string>) || {}
+              console.log('[useZentao] onBugsUpdated: usersMap大小:', Object.keys(usersMap).length)
+              const invalidAccounts = new Set(['', 'closed', 'guest', 'system', 'admin'])
+              const memberMap = new Map<string, { name: string; account: string; bugCount: number; bugs: Bug[] }>()
+
+              // 先从 usersMap 创建所有成员
+              Object.entries(usersMap).forEach(([account, realName]) => {
+                if (invalidAccounts.has(account)) return
+                const name = (typeof realName === 'string' ? realName : (realName as unknown as { realname?: string })?.realname) || account
+                memberMap.set(account, { name, account, bugCount: 0, bugs: [] })
+              })
+
+              // 统计每人的 active bug 数量
+              uniqueBugs.forEach(bug => {
+                const account = bug.assignedTo || ''
+                if (!account || account === '未指派') return
+                if (!memberMap.has(account)) {
+                  memberMap.set(account, {
+                    name: bug.assignedToRealName || account,
+                    account,
+                    bugCount: 0,
+                    bugs: [],
+                  })
+                }
+                const member = memberMap.get(account)!
+                if (bug.status === 'active') {
+                  member.bugCount++
+                  member.bugs.push(bug)
+                }
+              })
+
+              let teamMembers: TeamMember[] = Array.from(memberMap.values())
+              const currentUser = useSettingsStore.getState().username || (await api.storeGet?.('username') as string || '')
+              if (currentUser) {
+                teamMembers.sort((a, b) => b.bugCount - a.bugCount)
+                teamMembers = ensureCurrentUserInList(teamMembers, currentUser)
+              }
+              setTeamMembers(teamMembers)
+            }
+          }).catch(err => {
+            console.log('[useZentao] 团队Bug获取失败(降级):', err)
+          })
+        })
+
+        // 监听API错误
+        api.onApiError?.((msg) => {
+          console.error('[useZentao] API错误:', msg)
+        })
+
+        // 自动重连：如果有保存的禅道配置，启动时自动连接
+        if (!autoConnectedRef.current && api.storeGet) {
+          autoConnectedRef.current = true
+          Promise.all([
+            api.storeGet('zentaoUrl'),
+            api.storeGet('username'),
+            api.storeGet('password'),
+          ]).then(([url, user, pwd]) => {
+            if (url && user && pwd) {
+              console.log('[useZentao] 检测到已保存的禅道配置，自动连接...')
+              setConnectionStatus('connecting')
+              api.zentaoConnect({ url: url as string, username: user as string, password: pwd as string })
+                .then((result) => {
+                  if (result && result.success) {
+                    setConnectionStatus('online')
+                    // 自动重连成功，保存用户名到 settingsStore
+                    useSettingsStore.getState().setUsername(user as string)
+                    fetchBugs()
+                    // 启动轮询
+                    if (timerRef.current) clearInterval(timerRef.current)
+                    timerRef.current = setInterval(fetchBugs, pollInterval)
+                  } else {
+                    console.error('[useZentao] 自动重连失败:', result?.error)
+                    setConnectionStatus('offline')
+                  }
+                })
+                .catch((err) => {
+                  console.error('[useZentao] 自动重连异常:', err)
+                  setConnectionStatus('offline')
+                })
+            }
+          }).catch(() => { /* noop */ })
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const connect = useCallback(
     async (url: string, username: string, password: string) => {
@@ -197,6 +305,8 @@ export function useZentao(pollInterval = 60000) {
 
         if (result && result.success) {
           setConnectionStatus('online')
+          // 保存用户名到 settingsStore 以供同步访问
+          useSettingsStore.getState().setUsername(username)
           await fetchBugs()
 
           // 启动轮询

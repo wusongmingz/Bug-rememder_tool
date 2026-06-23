@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { X, Wifi, WifiOff, Loader2, CheckCircle, AlertTriangle } from 'lucide-react'
 import GlassCard from '@/components/Shared/GlassCard'
+import { useSettingsStore } from '@/stores/settingsStore'
+import { useBugStore } from '@/stores/bugStore'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -11,6 +13,7 @@ interface ElectronStoreAPI {
   storeSet: (key: string, value: unknown) => Promise<boolean>
   zentaoConnect: (config: { url: string; username: string; password: string }) => Promise<{ success: boolean; error?: string }>
   zentaoDisconnect: () => Promise<{ success: boolean }>
+  zentaoGetProductList?: () => Promise<{ success: boolean; products?: { id: number; name: string }[]; error?: string }>
 }
 
 function getAPI(): ElectronStoreAPI | null {
@@ -32,9 +35,15 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [pollInterval, setPollInterval] = useState(60)
-  const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle')
+  const [localStatus, setLocalStatus] = useState<'idle' | 'connecting' | 'error'>('idle')
+  const globalConnectionStatus = useBugStore(state => state.connectionStatus)
+  // 如果 bugStore 显示已连接，则按钮显示"断开连接"
+  const isConnected = globalConnectionStatus === 'online'
   const [errorMsg, setErrorMsg] = useState('')
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'warn' | 'error' } | null>(null)
+  const [products, setProducts] = useState<{ id: number; name: string }[]>([])
+  const [loadingProducts, setLoadingProducts] = useState(false)
+  const { selectedProductIds, setSelectedProductIds } = useSettingsStore()
 
   const showToast = (msg: string, type: 'success' | 'warn' | 'error') => {
     setToast({ msg, type })
@@ -50,6 +59,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       api.storeGet('pollInterval').then((val) => {
         if (val) setPollInterval(Math.round((val as number) / 1000))
       })
+      // 加载已保存的产品勾选
+      api.storeGet('selectedProductIds').then((val) => {
+        if (val && Array.isArray(val) && val.length > 0) {
+          setSelectedProductIds(val as number[])
+        }
+      })
     } else {
       // Web模式下从localStorage加载
       const url = localGet('url'); if (url) setZentaoUrl(url)
@@ -58,6 +73,13 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       const interval = localGet('pollInterval'); if (interval) setPollInterval(Number(interval))
     }
   }, [])
+
+  // 如果已连接，自动加载产品列表
+  useEffect(() => {
+    if (isConnected && products.length === 0) {
+      fetchProducts()
+    }
+  }, [isConnected])
 
   const handleConnect = async () => {
     const api = getAPI()
@@ -72,27 +94,53 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       return
     }
 
-    setStatus('connecting')
+    setLocalStatus('connecting')
     setErrorMsg('')
 
     try {
       // 保存轮询间隔
       await api.storeSet('pollInterval', pollInterval * 1000)
+      // 保存勾选的产品ID列表
+      await api.storeSet('selectedProductIds', selectedProductIds)
 
       const result = await api.zentaoConnect({ url: zentaoUrl, username, password })
       if (result.success) {
-        setStatus('connected')
+        setLocalStatus('idle')
         showToast('禅道连接成功', 'success')
+        // 连接成功后自动获取产品列表
+        fetchProducts()
       } else {
-        setStatus('error')
+        setLocalStatus('error')
         const msg = result.error || '连接失败'
         setErrorMsg(msg)
         showToast(msg, 'error')
       }
     } catch {
-      setStatus('error')
+      setLocalStatus('error')
       setErrorMsg('连接异常')
       showToast('连接异常，请检查网络或服务器地址', 'error')
+    }
+  }
+
+  const fetchProducts = async () => {
+    const api = getAPI()
+    if (!api || !api.zentaoGetProductList) return
+    setLoadingProducts(true)
+    try {
+      const result = await api.zentaoGetProductList()
+      if (result.success && result.products) {
+        setProducts(result.products)
+        // 如果用户没有手动选过，默认全选
+        if (selectedProductIds.length === 0) {
+          const allIds = result.products.map(p => p.id)
+          setSelectedProductIds(allIds)
+          await api.storeSet('selectedProductIds', allIds)
+        }
+      }
+    } catch (err) {
+      console.error('[SettingsPanel] 获取产品列表失败:', err)
+    } finally {
+      setLoadingProducts(false)
     }
   }
 
@@ -101,13 +149,13 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     if (!api) return
 
     await api.zentaoDisconnect()
-    setStatus('idle')
+    setLocalStatus('idle')
     showToast('已断开连接', 'success')
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-      <GlassCard className="w-[320px] max-h-[500px] overflow-y-auto relative">
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <GlassCard className="relative z-50 w-[320px] max-h-[500px] overflow-y-auto">
         {/* Toast 提示 */}
         {toast && (
           <div className={`absolute top-2 left-2 right-2 px-3 py-2 rounded-lg text-xs flex items-center gap-1.5 z-10
@@ -202,15 +250,73 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             <p className="text-xs text-red-400">{errorMsg}</p>
           )}
 
-          {status === 'connected' && (
+          {isConnected && (
             <p className="text-xs text-green-400 flex items-center gap-1">
               <Wifi size={12} /> 已连接
             </p>
           )}
 
+          {/* 产品选择区域 */}
+          {(products.length > 0 || loadingProducts) && (
+            <div className="space-y-2 pt-2 border-t border-white/10">
+              <label className="text-xs text-textSecondary">统计项目（取消勾选已停止的项目）</label>
+              {loadingProducts ? (
+                <div className="flex items-center gap-1 text-xs text-textSecondary">
+                  <Loader2 size={12} className="animate-spin" /> 加载产品列表...
+                </div>
+              ) : (
+                <>
+                  <div className="max-h-32 overflow-y-auto space-y-0.5 bg-black/20 rounded-lg p-2">
+                    {products.map(p => (
+                      <label key={p.id} className="flex items-center gap-2 text-xs text-textPrimary cursor-pointer hover:bg-white/5 px-2 py-1 rounded">
+                        <input
+                          type="checkbox"
+                          checked={selectedProductIds.includes(p.id)}
+                          onChange={(e) => {
+                            let newIds: number[]
+                            if (e.target.checked) {
+                              newIds = [...selectedProductIds, p.id]
+                            } else {
+                              newIds = selectedProductIds.filter(id => id !== p.id)
+                            }
+                            setSelectedProductIds(newIds)
+                            // 实时保存
+                            const api = getAPI()
+                            if (api) api.storeSet('selectedProductIds', newIds)
+                          }}
+                          className="accent-[#00ff88] w-3 h-3"
+                        />
+                        {p.name}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        const allIds = products.map(p => p.id)
+                        setSelectedProductIds(allIds)
+                        const api = getAPI()
+                        if (api) api.storeSet('selectedProductIds', allIds)
+                      }}
+                      className="text-[10px] text-[#00ff88] hover:underline"
+                    >全选</button>
+                    <button
+                      onClick={() => {
+                        setSelectedProductIds([])
+                        const api = getAPI()
+                        if (api) api.storeSet('selectedProductIds', [])
+                      }}
+                      className="text-[10px] text-textSecondary hover:underline"
+                    >全不选</button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {/* 按钮 */}
           <div className="flex gap-2 pt-1">
-            {status === 'connected' ? (
+            {isConnected ? (
               <button
                 onClick={handleDisconnect}
                 className="flex-1 px-3 py-2 rounded-lg text-xs font-medium
@@ -223,14 +329,14 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             ) : (
               <button
                 onClick={handleConnect}
-                disabled={status === 'connecting' || !zentaoUrl || !username}
+                disabled={localStatus === 'connecting' || !zentaoUrl || !username}
                 className="flex-1 px-3 py-2 rounded-lg text-xs font-medium
                   bg-accent/20 text-accent border border-accent/30
                   hover:bg-accent/30 transition-colors duration-150
                   disabled:opacity-40 disabled:cursor-not-allowed
                   flex items-center justify-center gap-1"
               >
-                {status === 'connecting' ? (
+                {localStatus === 'connecting' ? (
                   <><Loader2 size={12} className="animate-spin" /> 连接中...</>
                 ) : (
                   <><Wifi size={12} /> 连接</>
