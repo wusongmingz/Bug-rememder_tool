@@ -154,7 +154,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
+    >
       <GlassCard className="relative z-50 w-[320px] max-h-[500px] overflow-y-auto">
         {/* Toast 提示 */}
         {toast && (
@@ -284,7 +287,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                             const api = getAPI()
                             if (api) api.storeSet('selectedProductIds', newIds)
                           }}
-                          className="accent-[#00ff88] w-3 h-3"
+                          className="accent-[#00ff88] w-4 h-4"
                         />
                         {p.name}
                       </label>
@@ -298,7 +301,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                         const api = getAPI()
                         if (api) api.storeSet('selectedProductIds', allIds)
                       }}
-                      className="text-[10px] text-[#00ff88] hover:underline"
+                      className="px-3 py-1.5 text-xs bg-[#00ff88]/20 text-[#00ff88] hover:bg-[#00ff88]/30 rounded transition-colors"
                     >全选</button>
                     <button
                       onClick={() => {
@@ -306,7 +309,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                         const api = getAPI()
                         if (api) api.storeSet('selectedProductIds', [])
                       }}
-                      className="text-[10px] text-textSecondary hover:underline"
+                      className="px-3 py-1.5 text-xs bg-white/10 text-textSecondary hover:bg-white/20 rounded transition-colors"
                     >全不选</button>
                   </div>
                 </>

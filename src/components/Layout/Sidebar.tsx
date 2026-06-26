@@ -16,7 +16,7 @@ const navItems: { icon: typeof Bug; view: ViewType; label: string }[] = [
 ]
 
 export default function Sidebar() {
-  const { currentView, setCurrentView } = useSettingsStore()
+  const { currentView, setCurrentView, username } = useSettingsStore()
   const { bugs } = useBugStore()
   const [showSettings, setShowSettings] = useState(false)
 
@@ -84,12 +84,11 @@ export default function Sidebar() {
               <span className="text-accent text-xs font-bold">P</span>
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-xs text-textPrimary font-medium truncate">开发者</div>
-              <div className="text-[10px] text-textSecondary">全栈工程师</div>
+              <div className="text-xs text-textPrimary font-medium truncate">{username || '开发者'}</div>
             </div>
           </div>
           {/* EXP 经验条 */}
-          <div className="mt-2">
+          {/* <div className="mt-2">
             <div className="flex justify-between text-[10px] text-textSecondary mb-0.5">
               <span>EXP</span>
               <span>620 / 1000</span>
@@ -97,7 +96,7 @@ export default function Sidebar() {
             <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
               <div className="h-full bg-accent/80 rounded-full" style={{ width: '62%' }} />
             </div>
-          </div>
+          </div> */}
         </div>
       </aside>
 

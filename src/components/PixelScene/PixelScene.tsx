@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useBugStore } from '../../stores/bugStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useAchievementStore } from '../../stores/achievementStore'
-import { PixelAnimator, getStateFromBugCount, TeamMemberData } from './animator'
+import { PixelAnimator, getStateFromBugCount, TeamMemberData, SpeechBubbleData } from './animator'
 // import { initSprites } from './spriteLoader' // 禁用精灵图
 import { TeamMember } from '../../types'
 
@@ -63,6 +63,8 @@ export default function PixelScene() {
   const bubbleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const bubbleCleanupRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  const canvasBubbleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   const bugs = useBugStore(state => state.bugs)
   const connectionStatus = useBugStore(state => state.connectionStatus)
   const teamMembers = useBugStore(state => state.teamMembers)
@@ -73,7 +75,9 @@ export default function PixelScene() {
 
   const [labelPositions, setLabelPositions] = useState<LabelPosition[]>([])
   const [bubbles, setBubbles] = useState<SpeechBubble[]>([])
+  const [canvasBubbles, setCanvasBubbles] = useState<SpeechBubbleData[]>([])
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [canvasSize, setCanvasSize] = useState<{ width: number; height: number }>({ width: 700, height: 350 })
 
   // Achievement store
   const incrementWhipCount = useAchievementStore(state => state.incrementWhipCount)
@@ -107,11 +111,12 @@ export default function PixelScene() {
   const getDisplayMembers = useCallback((): TeamMember[] => {
     if (teamMembers.length === 0) return []
     if (selectedMembers.length === 0) {
-      return teamMembers.slice(0, 10)
+      // 全不选时只显示当前用户
+      return teamMembers.filter(m => m.isCurrentUser).slice(0, 20)
     }
     return teamMembers.filter(m =>
       m.isCurrentUser || selectedMembers.includes(m.account || m.name)
-    ).slice(0, 10)
+    ).slice(0, 20)
   }, [teamMembers, selectedMembers])
 
   // 定时从 animator获取标签位置
@@ -127,6 +132,9 @@ export default function PixelScene() {
       }
     }
     setLabelPositions(positions)
+    // Update canvas size from animator
+    const size = animator.getCanvasSize()
+    setCanvasSize(prev => (prev.width === size.width && prev.height === size.height) ? prev : size)
   }, [])
 
   // 禁用精灵图，使用增强版程序化渲染
@@ -159,12 +167,27 @@ export default function PixelScene() {
     // 定时更新标签位置
     labelTimerRef.current = setInterval(updateLabelPositions, 500)
 
+    // 定时更新canvas气泡（~6次/秒，足够流畅且不浪费性能）
+    canvasBubbleTimerRef.current = setInterval(() => {
+      const anim = animatorRef.current
+      if (!anim) return
+      const newBubbles = anim.getActiveBubbles()
+      setCanvasBubbles(prev => {
+        if (prev.length === 0 && newBubbles.length === 0) return prev
+        return [...newBubbles]
+      })
+    }, 160)
+
     return () => {
       animator.destroy()
       animatorRef.current = null
       if (labelTimerRef.current) {
         clearInterval(labelTimerRef.current)
         labelTimerRef.current = null
+      }
+      if (canvasBubbleTimerRef.current) {
+        clearInterval(canvasBubbleTimerRef.current)
+        canvasBubbleTimerRef.current = null
       }
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -245,8 +268,8 @@ export default function PixelScene() {
 
     const rect = canvasRef.current.getBoundingClientRect()
     // 将页面坐标转换为canvas逻辑坐标
-    const scaleX = 700 / rect.width
-    const scaleY = 350 / rect.height
+    const scaleX = canvasSize.width / rect.width
+    const scaleY = canvasSize.height / rect.height
     const canvasX = (e.clientX - rect.left) * scaleX
     const canvasY = (e.clientY - rect.top) * scaleY
 
@@ -273,7 +296,7 @@ export default function PixelScene() {
     } else {
       setContextMenu(null) // 点击空白处关闭菜单
     }
-  }, [getDisplayMembers, incrementCatPet])
+  }, [getDisplayMembers, incrementCatPet, canvasSize])
 
   // 检测团队成员的bug数增加触发老板动画 + 气泡 + 特效
   useEffect(() => {
@@ -391,8 +414,8 @@ export default function PixelScene() {
       {/* Canvas像素场景 */}
       <canvas
         ref={canvasRef}
-        width={700}
-        height={350}
+        width={canvasSize.width}
+        height={canvasSize.height}
         className="w-full h-full"
         onClick={handleCanvasClick}
         style={{ cursor: 'pointer', imageRendering: 'pixelated' }}
@@ -400,51 +423,58 @@ export default function PixelScene() {
 
       {/* 右键菜单（点击同事后弹出） */}
       {contextMenu && (
-        <div
-          className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-50 py-1 min-w-[120px]"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-        >
-          <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-700">
-            {contextMenu.memberName}
+        <>
+          {/* 点击外部关闭遮罩 */}
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setContextMenu(null)}
+          />
+          <div
+            className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-50 py-1.5 min-w-[150px]"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <div className="px-3 py-1.5 text-xs text-gray-400 border-b border-gray-700">
+              {contextMenu.memberName}
+            </div>
+            <button
+              className="w-full px-3 py-2 text-left text-sm hover:bg-gray-700 text-red-400 transition-colors"
+              onClick={() => {
+                animatorRef.current?.triggerUserWhip(contextMenu.memberIndex)
+                incrementWhipCount()
+                setContextMenu(null)
+              }}
+            >
+              🔥 鞭策一下
+            </button>
+            <button
+              className="w-full px-3 py-2 text-left text-sm hover:bg-gray-700 text-green-400 transition-colors"
+              onClick={() => {
+                animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'coffee')
+                setContextMenu(null)
+              }}
+            >
+              ☕ 投喂咖啡
+            </button>
+            <button
+              className="w-full px-3 py-2 text-left text-sm hover:bg-gray-700 text-yellow-400 transition-colors"
+              onClick={() => {
+                animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'snack')
+                setContextMenu(null)
+              }}
+            >
+              🍪 投喂零食
+            </button>
+            <button
+              className="w-full px-3 py-2 text-left text-sm hover:bg-gray-700 text-blue-400 transition-colors"
+              onClick={() => {
+                animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'energy')
+                setContextMenu(null)
+              }}
+            >
+              ⚡ 能量饮料
+            </button>
           </div>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-red-400"
-            onClick={() => {
-              animatorRef.current?.triggerUserWhip(contextMenu.memberIndex)
-              incrementWhipCount()
-              setContextMenu(null)
-            }}
-          >
-            🔥 鞭策一下
-          </button>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-green-400"
-            onClick={() => {
-              animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'coffee')
-              setContextMenu(null)
-            }}
-          >
-            ☕ 投喂咖啡
-          </button>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-yellow-400"
-            onClick={() => {
-              animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'snack')
-              setContextMenu(null)
-            }}
-          >
-            🍪 投喂零食
-          </button>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-blue-400"
-            onClick={() => {
-              animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'energy')
-              setContextMenu(null)
-            }}
-          >
-            ⚡ 能量饮料
-          </button>
-        </div>
+        </>
       )}
 
       {/* 没有数据时显示等待界面 */}
@@ -463,13 +493,15 @@ export default function PixelScene() {
       {/* HTML名字标签覆盖层 */}
       {teamMembers.length > 0 && (
         <div className="absolute inset-0 pointer-events-none">
-          {labelPositions.map((label) => (
+          {labelPositions.map((label) => {
+            const labelFontSize = labelPositions.length > 14 ? '9px' : '10px'
+            return (
             <div
               key={label.name}
               className="absolute flex items-center gap-1"
               style={{
-                left: `${(label.x / 700) * 100}%`,
-                top: `${(label.y / 350) * 100}%`,
+                left: `${(label.x / canvasSize.width) * 100}%`,
+                top: `${(label.y / canvasSize.height) * 100}%`,
                 transform: 'translateX(-50%)',
                 whiteSpace: 'nowrap',
               }}
@@ -477,17 +509,18 @@ export default function PixelScene() {
               {label.isCurrentUser && (
                 <span className="text-[#00ff88] text-[8px]">▼</span>
               )}
-              <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+              <span className={`font-medium px-1.5 py-0.5 rounded ${
                 label.isCurrentUser
                   ? 'text-[#00ff88] bg-[#00ff88]/20 border border-[#00ff88]/40'
                   : 'text-white bg-black/60'
-              }`}>
+              }`} style={{ fontSize: labelFontSize }}>
                 {label.name}
               </span>
               {label.bugCount > 0 && (
                 <span
-                  className="text-[9px] font-bold px-1 py-0.5 rounded"
+                  className="font-bold px-1 py-0.5 rounded"
                   style={{
+                    fontSize: '9px',
                     backgroundColor: label.bugCount <= 3 ? 'rgba(0,200,100,0.3)' : label.bugCount <= 7 ? 'rgba(255,107,53,0.3)' : 'rgba(255,50,50,0.4)',
                     color: label.bugCount <= 3 ? '#00ff88' : label.bugCount <= 7 ? '#ff6b35' : '#ff4444',
                   }}
@@ -496,7 +529,8 @@ export default function PixelScene() {
                 </span>
               )}
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -521,8 +555,8 @@ export default function PixelScene() {
                   transition={{ duration: 0.25, ease: 'easeOut' }}
                   className="absolute"
                   style={{
-                    left: `${(pos.x / 700) * 100}%`,
-                    top: `${((pos.y - 28) / 350) * 100}%`,
+                    left: `${(pos.x / canvasSize.width) * 100}%`,
+                    top: `${((pos.y - 28) / canvasSize.height) * 100}%`,
                     transform: 'translateX(-50%)',
                   }}
                 >
@@ -542,6 +576,57 @@ export default function PixelScene() {
               )
             })}
           </AnimatePresence>
+        </div>
+      )}
+
+      {/* Canvas坐标气泡覆盖层（来自animator的事件/老板/抽人/投喂等气泡） */}
+      {canvasBubbles.length > 0 && (
+        <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
+          {canvasBubbles.map(bubble => {
+            const leftPercent = (bubble.x / canvasSize.width) * 100
+            const topPercent = (bubble.y / canvasSize.height) * 100
+            const isShout = bubble.type === 'shout'
+            const isThought = bubble.type === 'thought'
+            const textColor = bubble.color || (isShout ? '#ff6b6b' : '#ffffff')
+            const bgClass = isShout
+              ? 'bg-red-900/90 border-red-500/50'
+              : isThought
+                ? 'bg-gray-800/90 border-gray-600/50'
+                : 'bg-[rgba(20,20,40,0.9)] border-white/10'
+            const triangleBg = isShout
+              ? 'rgba(127,29,29,0.9)'
+              : isThought
+                ? 'rgba(31,41,55,0.9)'
+                : 'rgba(20,20,40,0.9)'
+
+            return (
+              <div
+                key={bubble.id}
+                className="absolute"
+                style={{
+                  left: `${leftPercent}%`,
+                  top: `${topPercent}%`,
+                  transform: 'translateX(-50%) translateY(-100%)',
+                  animation: 'bubbleFadeIn 0.2s ease-out',
+                }}
+              >
+                <div className={`relative rounded-lg px-2.5 py-1 border text-xs font-bold whitespace-nowrap ${bgClass}`}>
+                  <span style={{ color: textColor }}>
+                    {bubble.text}
+                  </span>
+                  {/* 小三角尖 */}
+                  <div
+                    className="absolute left-1/2 -translate-x-1/2 bottom-[-6px] w-0 h-0"
+                    style={{
+                      borderLeft: '4px solid transparent',
+                      borderRight: '4px solid transparent',
+                      borderTop: `6px solid ${triangleBg}`,
+                    }}
+                  />
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>

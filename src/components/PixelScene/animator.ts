@@ -14,6 +14,18 @@ import { EventSystem, RandomEvent } from './EventSystem'
 
 export type ProgrammerState = 'idle' | 'relaxed' | 'working' | 'anxious' | 'crazy' | 'collapse'
 
+// === HTML Speech Bubble Data (exposed to React layer) ===
+export interface SpeechBubbleData {
+  id: string
+  x: number            // canvas coordinate x
+  y: number            // canvas coordinate y
+  text: string
+  color?: string       // text color
+  bgColor?: string     // background color
+  duration: number     // remaining frames
+  type: 'speech' | 'thought' | 'shout'
+}
+
 // === Sprite Effect System ===
 export type SpriteEffectType = 'notification' | 'levelUp' | 'complete' | 'bugAppear' | 'energyRestore' | 'expPlus' | 'assign'
 
@@ -197,18 +209,70 @@ export function getStateFromBugCount(count: number): ProgrammerState {
 
 // ====== Constants ======
 const CANVAS_W = 700
-const CANVAS_H = 350
+const DEFAULT_CANVAS_H = 350
 
 const WALL_TOP = 0
 const WALL_BOTTOM = 70
 const WORK_TOP = 70
-const WORK_BOTTOM = 285
-const FLOOR_TOP = 285
-const FLOOR_BOTTOM = 350
+// Dynamic layout constants (computed per instance based on member count)
+const DEFAULT_WORK_BOTTOM = 285
+const DEFAULT_FLOOR_TOP = 285
+const DEFAULT_FLOOR_BOTTOM = 350
+const FLOOR_HEIGHT = 65 // corridor height stays fixed
+
+// === Layout Config ===
+interface LayoutConfig {
+  rows: number
+  cols: number
+  canvasHeight: number
+  personScale: number
+}
+
+function getLayoutConfig(memberCount: number): LayoutConfig {
+  if (memberCount <= 5) {
+    return { rows: 1, cols: 5, canvasHeight: 350, personScale: 1.0 }
+  } else if (memberCount <= 10) {
+    return { rows: 2, cols: 5, canvasHeight: 350, personScale: 1.0 }
+  } else if (memberCount <= 14) {
+    return { rows: 2, cols: 7, canvasHeight: 350, personScale: 0.9 }
+  } else {
+    // 15-20 people: 3 rows × 7 cols
+    return { rows: 3, cols: 7, canvasHeight: 420, personScale: 0.85 }
+  }
+}
 
 // Sprite scale - 102x128px sprite source renders at ~55px high in canvas
 // 55/128 ≈ 0.43, use 0.45 for slightly larger characters
-const SPRITE_SCALE = 0.45
+const BASE_SPRITE_SCALE = 0.45
+
+// === Stardew Valley Style Palette ===
+const SV_PALETTE = {
+  // Floor
+  woodFloor: ['#c09060', '#b08050', '#a07040'],
+  tileFloor: ['#d0c8b8', '#c8c0b0'],
+  // Walls
+  wallBase: '#e8dcc8',
+  wallTrim: '#8b7355',
+  wallTop: '#d4c8b4',
+  wallStripe: 'rgba(180, 160, 130, 0.1)',
+  // Furniture
+  deskWood: ['#9b7340', '#8b6330', '#7b5320'],
+  chair: ['#4a6fa5', '#3a5f95', '#2a4f85'],
+  // Lighting
+  windowLight: 'rgba(255, 248, 220, 0.15)',
+  lampLight: 'rgba(255, 240, 200, 0.2)',
+  shadow: 'rgba(60, 40, 20, 0.15)',
+  // Window
+  windowFrame: '#5c3d1e',
+  windowGlass: '#87ceeb',
+  windowPane: '#6b4420',
+  curtain: '#c85a4a',
+  curtainDark: '#b84a3a',
+  // Sky
+  skyBlue: '#a8d8f0',
+  skyLight: '#c8e8ff',
+  cloudWhite: 'rgba(255,255,255,0.5)',
+}
 
 // Colors
 const SHIRT_COLORS = ['#4a90d9', '#d94a4a', '#4ad99a', '#d9a84a', '#9a4ad9', '#4ad9d9', '#d94a9a', '#7a7a7a']
@@ -308,6 +372,7 @@ function selectPersonAction(bugCount: number, seed: number): PersonAction {
 // ====== Main Animator Class ======
 export class PixelAnimator {
   private ctx: CanvasRenderingContext2D
+  private canvas: HTMLCanvasElement
   private state: ProgrammerState = 'idle'
   private frameCount = 0
   private animationId = 0
@@ -320,6 +385,14 @@ export class PixelAnimator {
   private overflowCount = 0
   private personStates: Map<string, PersonState> = new Map()
   private environment: EnvironmentState
+
+  // Dynamic layout properties
+  private canvasH = DEFAULT_CANVAS_H
+  private workBottom = DEFAULT_WORK_BOTTOM
+  private floorTop = DEFAULT_FLOOR_TOP
+  private floorBottom = DEFAULT_FLOOR_BOTTOM
+  private personScale = 1.0
+  private layoutConfig: LayoutConfig = getLayoutConfig(0)
   private starPositions: { x: number; y: number; phase: number }[] = []
   private userWhip: UserWhipState
 
@@ -341,12 +414,15 @@ export class PixelAnimator {
   // Off-Work System
   private offWork: OffWorkState
   private offWorkTriggeredThisHour = false
-  private lastCheckedMinute = -1
 
   // Sprite Effect System
   private activeEffects: SpriteEffect[] = []
   private maxEffects = 10
   private effectIdCounter = 0
+
+  // HTML Speech Bubble System
+  private activeBubbles: SpeechBubbleData[] = []
+  private bubbleIdCounter = 0
 
   // Offscreen background cache
   private offscreenCanvas: HTMLCanvasElement
@@ -362,25 +438,26 @@ export class PixelAnimator {
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Cannot get 2d context')
+    this.canvas = canvas
     this.ctx = ctx
     this.ctx.imageSmoothingEnabled = false
 
     // Create offscreen canvas for background caching
     this.offscreenCanvas = document.createElement('canvas')
     this.offscreenCanvas.width = CANVAS_W
-    this.offscreenCanvas.height = CANVAS_H
+    this.offscreenCanvas.height = this.canvasH
     const offCtx = this.offscreenCanvas.getContext('2d')
     if (!offCtx) throw new Error('Cannot get offscreen 2d context')
     this.offscreenCtx = offCtx
     this.offscreenCtx.imageSmoothingEnabled = false
 
     this.cat = {
-      x: 100, y: FLOOR_TOP + 25, targetX: 300,
+      x: 100, y: this.floorTop + 25, targetX: 300,
       state: 'walking', direction: 'right', frame: 0, stateTimer: 0,
-      yarnBallX: 150, yarnBallY: FLOOR_TOP + 35,
+      yarnBallX: 150, yarnBallY: this.floorTop + 35,
     }
     this.boss = {
-      active: false, x: CANVAS_W - 35, y: FLOOR_TOP + 30,
+      active: false, x: CANVAS_W - 35, y: this.floorTop + 30,
       targetX: 250, targetMemberIndex: -1,
       phase: 'walking', frame: 0, whipFrame: 0,
       whipCount: 0, speechBubbleTimer: 0, speechText: '',
@@ -462,6 +539,38 @@ export class PixelAnimator {
     document.addEventListener('visibilitychange', this.visibilityHandler)
   }
 
+  // === Public: Get active speech bubbles for HTML rendering ===
+  getActiveBubbles(): SpeechBubbleData[] {
+    return this.activeBubbles
+  }
+
+  private addCanvasBubble(x: number, y: number, text: string, type: SpeechBubbleData['type'] = 'speech', color?: string, duration?: number): void {
+    this.bubbleIdCounter++
+    // Avoid duplicate bubbles with same text at same approx position
+    const existing = this.activeBubbles.find(b => b.text === text && Math.abs(b.x - x) < 20 && Math.abs(b.y - y) < 20)
+    if (existing) {
+      existing.duration = duration || 90 // refresh duration
+      return
+    }
+    this.activeBubbles.push({
+      id: `cb_${this.bubbleIdCounter}_${Date.now()}`,
+      x, y, text, type,
+      color,
+      duration: duration || 90, // default ~3s at 30fps
+    })
+    // Limit max bubbles
+    if (this.activeBubbles.length > 15) {
+      this.activeBubbles.shift()
+    }
+  }
+
+  private updateCanvasBubbles(): void {
+    this.activeBubbles = this.activeBubbles.filter(b => {
+      b.duration--
+      return b.duration > 0
+    })
+  }
+
   setState(state: ProgrammerState) {
     if (this.state !== state) {
       this.state = state
@@ -469,14 +578,16 @@ export class PixelAnimator {
   }
 
   setTeamMembers(members: TeamMemberData[]) {
-    if (members.length > 10) {
+    const maxMembers = 20
+    if (members.length > maxMembers) {
       const sorted = [...members].sort((a, b) => b.bugCount - a.bugCount)
-      this.displayMembers = sorted.slice(0, 10)
-      this.overflowCount = members.length - 10
+      this.displayMembers = sorted.slice(0, maxMembers)
+      this.overflowCount = members.length - maxMembers
     } else {
       this.displayMembers = members
       this.overflowCount = 0
     }
+    this.updateCanvasLayout(this.displayMembers.length)
     this.buildWorkstations()
     this.initPersonStates()
     this.environment.totalBugs = members.reduce((sum, m) => sum + m.bugCount, 0)
@@ -529,7 +640,7 @@ export class PixelAnimator {
     }
     const bubbleTexts = ['干活！', '快修Bug！', '又有Bug了！', '加班！']
     this.boss = {
-      active: true, x: CANVAS_W - 35, y: FLOOR_TOP + 30,
+      active: true, x: CANVAS_W - 35, y: this.floorTop + 30,
       targetX, targetMemberIndex,
       phase: 'walking', frame: 0, whipFrame: 0,
       whipCount: 0, speechBubbleTimer: 0,
@@ -586,33 +697,23 @@ export class PixelAnimator {
     if (members.length === 0) return
 
     const count = members.length
-    const maxPerRow = count <= 5 ? count : Math.min(6, Math.ceil(count / 2))
-    const row1Count = Math.min(count, maxPerRow)
-    const row2Count = Math.max(0, count - maxPerRow)
+    const { rows, cols } = this.layoutConfig
 
     const margin = 20
     const availW = CANVAS_W - margin * 2
-    const slotW1 = row1Count > 0 ? availW / row1Count : 0
-    const slotW2 = row2Count > 0 ? availW / row2Count : 0
+    const workAreaHeight = this.workBottom - WORK_TOP
+    const startY = WORK_TOP + 30
+    const rowSpacing = rows > 1 ? (workAreaHeight - 60) / (rows - 1) : 0
 
-    const row1Y = WORK_TOP + 30
-    const row2Y = WORK_TOP + 130
-
-    for (let i = 0; i < row1Count; i++) {
+    for (let i = 0; i < count; i++) {
+      const row = Math.floor(i / cols)
+      const col = i % cols
+      const rowMemberCount = Math.min(cols, count - row * cols)
+      const slotW = availW / rowMemberCount
       const m = members[i]
       this.workstations.push({
-        x: margin + i * slotW1 + slotW1 / 2 - 24,
-        y: row1Y,
-        name: m.name, state: getStateFromBugCount(m.bugCount),
-        bugCount: m.bugCount, decorations: getDecorations(m.name),
-        appearance: getPersonAppearance(m.name),
-      })
-    }
-    for (let i = 0; i < row2Count; i++) {
-      const m = members[maxPerRow + i]
-      this.workstations.push({
-        x: margin + i * slotW2 + slotW2 / 2 - 24,
-        y: row2Y,
+        x: margin + col * slotW + slotW / 2 - 24,
+        y: startY + row * rowSpacing,
         name: m.name, state: getStateFromBugCount(m.bugCount),
         bugCount: m.bugCount, decorations: getDecorations(m.name),
         appearance: getPersonAppearance(m.name),
@@ -620,35 +721,89 @@ export class PixelAnimator {
     }
   }
 
+  /** Update canvas size and layout properties based on member count */
+  private updateCanvasLayout(memberCount: number): void {
+    const config = getLayoutConfig(memberCount)
+    this.layoutConfig = config
+    this.personScale = config.personScale
+
+    const newH = config.canvasHeight
+    if (newH !== this.canvasH) {
+      this.canvasH = newH
+      this.workBottom = newH - FLOOR_HEIGHT
+      this.floorTop = newH - FLOOR_HEIGHT
+      this.floorBottom = newH
+
+      // Resize actual canvas
+      this.canvas.height = newH
+      // Resize offscreen canvas
+      this.offscreenCanvas.height = newH
+      this.offscreenCtx.imageSmoothingEnabled = false
+
+      // Update cat and boss Y positions
+      this.cat.y = this.floorTop + 25
+      this.cat.yarnBallY = this.floorTop + 35
+      if (!this.boss.active) {
+        this.boss.y = this.floorTop + 30
+      }
+    }
+    this.bgDirty = true
+  }
+
+  /** Get current canvas dimensions (for PixelScene to read) */
+  getCanvasSize(): { width: number; height: number } {
+    return { width: CANVAS_W, height: this.canvasH }
+  }
+
   // ====== Background: Offscreen Cache ======
   private renderBackgroundCache() {
     const ctx = this.offscreenCtx
-    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H)
+    ctx.clearRect(0, 0, CANVAS_W, this.canvasH)
 
-    // Wall
-    ctx.fillStyle = '#2a2a40'
+    // Wall (Stardew Valley warm cream color)
+    ctx.fillStyle = SV_PALETTE.wallBase
     ctx.fillRect(0, WALL_TOP, CANVAS_W, WALL_BOTTOM - WALL_TOP)
-    ctx.fillStyle = '#3a3a55'
-    for (let i = 0; i < CANVAS_W; i += 40) ctx.fillRect(i, 0, 1, WALL_BOTTOM)
+    // Wallpaper subtle vertical stripes
+    ctx.fillStyle = SV_PALETTE.wallStripe
+    for (let i = 0; i < CANVAS_W; i += 20) ctx.fillRect(i, 0, 1, WALL_BOTTOM - 4)
+    // Horizontal wainscoting line
+    ctx.fillStyle = SV_PALETTE.wallTop
     ctx.fillRect(0, 35, CANVAS_W, 1)
+    // Kickboard / baseboard (warm wood trim)
+    ctx.fillStyle = SV_PALETTE.wallTrim
+    ctx.fillRect(0, WALL_BOTTOM - 4, CANVAS_W, 4)
 
-    // Floor (work area)
-    ctx.fillStyle = '#3d3530'
-    ctx.fillRect(0, WORK_TOP, CANVAS_W, WORK_BOTTOM - WORK_TOP)
-    ctx.fillStyle = '#4a4540'
-    for (let y = WORK_TOP; y < WORK_BOTTOM; y += 30) {
-      ctx.fillRect(0, y, CANVAS_W, 1)
+    // Floor (work area) - wood plank texture
+    for (let y = WORK_TOP; y < this.workBottom; y += 8) {
+      for (let x = 0; x < CANVAS_W; x += 16) {
+        const colorIndex = ((Math.floor(x / 16) + Math.floor(y / 8)) % 3)
+        ctx.fillStyle = SV_PALETTE.woodFloor[colorIndex]
+        ctx.fillRect(x, y, 16, 8)
+        // Plank seam (horizontal)
+        ctx.fillStyle = 'rgba(80, 50, 20, 0.25)'
+        ctx.fillRect(x, y + 7, 16, 1)
+        // Vertical seams (staggered)
+        if (Math.floor(y / 8) % 2 === 0) {
+          ctx.fillStyle = 'rgba(80, 50, 20, 0.2)'
+          ctx.fillRect(x + 15, y, 1, 8)
+        }
+      }
     }
 
-    // Bottom corridor
-    ctx.fillStyle = '#3d2b1f'
-    ctx.fillRect(0, FLOOR_TOP, CANVAS_W, FLOOR_BOTTOM - FLOOR_TOP)
-    ctx.fillStyle = '#4d3b2f'
-    for (let i = 0; i < CANVAS_W; i += 20) {
-      ctx.fillRect(i, FLOOR_TOP, 10, FLOOR_BOTTOM - FLOOR_TOP)
+    // Bottom corridor - tile floor
+    for (let y = this.floorTop; y < this.floorBottom; y += 12) {
+      for (let x = 0; x < CANVAS_W; x += 12) {
+        const ci = (Math.floor(x / 12) + Math.floor(y / 12)) % 2
+        ctx.fillStyle = SV_PALETTE.tileFloor[ci]
+        ctx.fillRect(x, y, 12, 12)
+        ctx.fillStyle = 'rgba(0,0,0,0.05)'
+        ctx.fillRect(x, y + 11, 12, 1)
+        ctx.fillRect(x + 11, y, 1, 12)
+      }
     }
-    ctx.fillStyle = '#5a4a3a'
-    ctx.fillRect(0, FLOOR_TOP, CANVAS_W, 2)
+    // Corridor top edge highlight
+    ctx.fillStyle = '#b8a890'
+    ctx.fillRect(0, this.floorTop, CANVAS_W, 2)
 
     // Static window frames (sky + cross, not animated elements)
     this.drawWindowStatic(ctx, 50, 8, 50, 40)
@@ -662,16 +817,16 @@ export class PixelAnimator {
     this.drawBossDoorTo(ctx)
 
     // Water cooler (static parts)
-    this.drawWaterCoolerStatic(ctx, CANVAS_W - 50, FLOOR_TOP + 8)
+    this.drawWaterCoolerStatic(ctx, CANVAS_W - 50, this.floorTop + 8)
 
     // Overflow indicator
     if (this.overflowCount > 0) {
-      ctx.fillStyle = 'rgba(0,0,0,0.6)'
-      ctx.fillRect(CANVAS_W - 90, WORK_BOTTOM - 22, 80, 18)
-      ctx.fillStyle = '#aaaaaa'
+      ctx.fillStyle = 'rgba(90,70,50,0.7)'
+      ctx.fillRect(CANVAS_W - 90, this.workBottom - 22, 80, 18)
+      ctx.fillStyle = '#f0e8d0'
       ctx.font = '9px monospace'
       ctx.textAlign = 'center'
-      ctx.fillText(`+${this.overflowCount} 其他`, CANVAS_W - 50, WORK_BOTTOM - 9)
+      ctx.fillText(`+${this.overflowCount} 其他`, CANVAS_W - 50, this.workBottom - 9)
       ctx.textAlign = 'left'
     }
 
@@ -679,59 +834,113 @@ export class PixelAnimator {
   }
 
   private drawWindowStatic(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-    ctx.fillStyle = '#555555'
+    // Window frame (dark wood)
+    ctx.fillStyle = SV_PALETTE.windowFrame
+    ctx.fillRect(x - 2, y - 2, w + 4, h + 4)
+    // Glass (sky blue)
+    ctx.fillStyle = SV_PALETTE.skyBlue
     ctx.fillRect(x, y, w, h)
-    ctx.fillStyle = '#1a3a5c'
-    ctx.fillRect(x + 3, y + 3, w - 6, h - 6)
-    // Cross frame
-    ctx.fillStyle = '#555555'
-    ctx.fillRect(x + w / 2 - 1, y + 3, 2, h - 6)
-    ctx.fillRect(x + 3, y + h / 2 - 1, w - 6, 2)
-    // Moon
-    ctx.fillStyle = '#ffffcc'
-    ctx.fillRect(x + w - 15, y + 8, 4, 4)
-    ctx.fillRect(x + w - 14, y + 7, 2, 1)
+    // Lighter sky gradient top
+    ctx.fillStyle = SV_PALETTE.skyLight
+    ctx.fillRect(x, y, w, h / 3)
+    // Window pane cross (wood)
+    ctx.fillStyle = SV_PALETTE.windowPane
+    ctx.fillRect(x + w / 2 - 1, y, 2, h)
+    ctx.fillRect(x, y + h / 2 - 1, w, 2)
+    // Curtains (left + right)
+    ctx.fillStyle = SV_PALETTE.curtain
+    ctx.fillRect(x - 4, y - 2, 6, h + 4)
+    ctx.fillRect(x + w - 2, y - 2, 6, h + 4)
+    // Curtain valance
+    ctx.fillStyle = SV_PALETTE.curtainDark
+    ctx.fillRect(x - 6, y - 6, w + 12, 5)
+    // Sun/cloud in sky
+    ctx.fillStyle = '#fff8d0'
+    ctx.fillRect(x + w - 14, y + 6, 5, 5)
+    ctx.fillRect(x + w - 15, y + 7, 1, 3)
+    ctx.fillRect(x + w - 9, y + 7, 1, 3)
+    // Window light cast onto floor below
+    ctx.fillStyle = SV_PALETTE.windowLight
+    ctx.fillRect(x - 5, WALL_BOTTOM, w + 10, 20)
   }
 
   private drawBulletinBoardTo(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    ctx.fillStyle = '#8b6914'
+    // Cork board with wood frame
+    ctx.fillStyle = '#7a5a28'
+    ctx.fillRect(x - 2, y - 2, 64, 46)
+    ctx.fillStyle = '#c9a56e'
     ctx.fillRect(x, y, 60, 42)
-    ctx.fillStyle = '#c9a96e'
-    ctx.fillRect(x + 3, y + 3, 54, 36)
+    // Cork texture dots
+    ctx.fillStyle = 'rgba(160, 120, 60, 0.3)'
+    for (let i = 0; i < 10; i++) {
+      ctx.fillRect(x + 5 + (i * 6) % 52, y + 4 + (i * 7) % 36, 2, 2)
+    }
     const noteColors = ['#ff6b6b', '#ffd93d', '#6bcfff', '#77dd77', '#ffb3de']
     for (let i = 0; i < 4; i++) {
       const nx = x + 5 + (i % 2) * 28
       const ny = y + 6 + Math.floor(i / 2) * 18
       ctx.fillStyle = noteColors[(42 + i * 3) % noteColors.length]
       ctx.fillRect(nx, ny, 20, 14)
+      // Pin
+      ctx.fillStyle = '#cc3333'
+      ctx.fillRect(nx + 9, ny - 1, 3, 3)
     }
   }
 
   private drawBossDoorTo(ctx: CanvasRenderingContext2D) {
     const dx = CANVAS_W - 42
-    const dy = FLOOR_TOP + 4
+    const dy = this.floorTop + 4
+    // Door frame (dark wood)
     ctx.fillStyle = '#4a3520'
+    ctx.fillRect(dx - 2, dy - 2, 34, 59)
+    // Door panel (warm brown)
+    ctx.fillStyle = '#7a5a30'
     ctx.fillRect(dx, dy, 30, 55)
-    ctx.fillStyle = '#5d4430'
-    ctx.fillRect(dx + 2, dy + 2, 26, 51)
+    // Door panels (raised)
+    ctx.fillStyle = '#8b6a40'
+    ctx.fillRect(dx + 4, dy + 5, 22, 20)
+    ctx.fillRect(dx + 4, dy + 30, 22, 20)
+    // Panel borders
+    ctx.fillStyle = '#6a4a20'
+    ctx.fillRect(dx + 4, dy + 5, 22, 1)
+    ctx.fillRect(dx + 4, dy + 24, 22, 1)
+    ctx.fillRect(dx + 4, dy + 30, 22, 1)
+    ctx.fillRect(dx + 4, dy + 49, 22, 1)
+    // Door knob (gold)
     ctx.fillStyle = '#f1c40f'
-    ctx.fillRect(dx + 5, dy + 28, 3, 3)
-    ctx.fillStyle = '#ffffff'
-    ctx.font = 'bold 7px monospace'
+    ctx.fillRect(dx + 5, dy + 28, 4, 4)
+    ctx.fillStyle = '#d4a80a'
+    ctx.fillRect(dx + 6, dy + 29, 2, 2)
+    // Name plate
+    ctx.fillStyle = '#d4a80a'
+    ctx.fillRect(dx + 8, dy + 8, 14, 8)
+    ctx.fillStyle = '#1a1a1a'
+    ctx.font = 'bold 6px monospace'
     ctx.textAlign = 'center'
     ctx.fillText('BOSS', dx + 15, dy + 14)
     ctx.textAlign = 'left'
   }
 
   private drawWaterCoolerStatic(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    ctx.fillStyle = '#b0bec5'
-    ctx.fillRect(x, y, 12, 30)
-    ctx.fillStyle = '#4fc3f7'
-    ctx.fillRect(x + 2, y - 8, 8, 10)
-    ctx.fillStyle = '#81d4fa'
-    ctx.fillRect(x + 3, y - 6, 6, 6)
-    ctx.fillStyle = '#78909c'
-    ctx.fillRect(x + 4, y + 14, 6, 3)
+    // Main body (light gray)
+    ctx.fillStyle = '#e8e8e8'
+    ctx.fillRect(x, y, 12, 24)
+    // Top water bottle (blue translucent)
+    ctx.fillStyle = '#6699cc'
+    ctx.fillRect(x + 1, y - 8, 10, 9)
+    ctx.fillStyle = '#88bbdd'
+    ctx.fillRect(x + 2, y - 7, 8, 7)
+    // Hot/cold buttons
+    ctx.fillStyle = '#cc3333'
+    ctx.fillRect(x + 3, y + 10, 2, 2)
+    ctx.fillStyle = '#3366cc'
+    ctx.fillRect(x + 7, y + 10, 2, 2)
+    // Base stand
+    ctx.fillStyle = '#cccccc'
+    ctx.fillRect(x - 1, y + 22, 14, 3)
+    // Drip tray
+    ctx.fillStyle = '#aaaaaa'
+    ctx.fillRect(x + 2, y + 14, 8, 2)
   }
 
   // ====== Dynamic background elements (drawn each frame on main canvas) ======
@@ -746,68 +955,72 @@ export class PixelAnimator {
     this.drawClock(470, 28)
 
     // Water cooler bubbles
-    this.drawWaterCoolerBubbles(CANVAS_W - 50, FLOOR_TOP + 8)
+    this.drawWaterCoolerBubbles(CANVAS_W - 50, this.floorTop + 8)
   }
 
   private drawWindowDynamic(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-    // Cloud drifting
+    // Cloud drifting (white fluffy)
     const cloudOffset = this.environment.cloudX
     const cloudInWindow = ((cloudOffset + x * 0.3) % (w + 30)) - 15
     if (cloudInWindow > -10 && cloudInWindow < w - 6) {
-      ctx.fillStyle = 'rgba(180,200,220,0.3)'
+      ctx.fillStyle = SV_PALETTE.cloudWhite
       const cx = x + 3 + Math.max(0, Math.min(cloudInWindow, w - 20))
-      ctx.fillRect(cx, y + h / 2 - 2, 12, 4)
-      ctx.fillRect(cx + 2, y + h / 2 - 4, 8, 3)
+      ctx.fillRect(cx, y + h / 2 + 2, 14, 4)
+      ctx.fillRect(cx + 2, y + h / 2, 10, 3)
+      ctx.fillRect(cx + 4, y + h / 2 - 2, 6, 3)
     }
 
-    // Twinkling stars
-    const windowIdx = Math.floor((x - 50) / 260)
-    for (let i = windowIdx * 3; i < windowIdx * 3 + 3 && i < this.starPositions.length; i++) {
-      const star = this.starPositions[i]
-      const twinkle = (this.frameCount + star.phase) % (80 + i * 20)
-      if (twinkle < 45) {
-        ctx.fillStyle = twinkle < 20 ? '#ffffff' : 'rgba(255,255,255,0.6)'
-        const sx = x + 5 + (star.x % (w - 16))
-        const sy = y + 5 + (star.y % (h - 12))
-        ctx.fillRect(sx, sy, 2, 2)
-        if (twinkle < 10) {
-          ctx.fillRect(sx - 1, sy + 0.5, 1, 1)
-          ctx.fillRect(sx + 2, sy + 0.5, 1, 1)
-        }
+    // Birds (small V shapes flying)
+    const birdPhase = (this.frameCount * 0.02 + x * 0.1) % 40
+    if (birdPhase < 30) {
+      const bx = x + 5 + birdPhase
+      const by = y + 8 + Math.sin(birdPhase * 0.3) * 3
+      if (bx < x + w - 5) {
+        ctx.fillStyle = '#4a4a4a'
+        ctx.fillRect(bx - 2, by, 1, 1)
+        ctx.fillRect(bx - 1, by - 1, 1, 1)
+        ctx.fillRect(bx, by, 1, 1)
+        ctx.fillRect(bx + 1, by - 1, 1, 1)
+        ctx.fillRect(bx + 2, by, 1, 1)
       }
     }
   }
 
   private drawClock(x: number, y: number) {
     const { ctx } = this
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(x - 8, y - 8, 16, 16)
-    ctx.fillStyle = '#1a1a1a'
+    // Clock frame (wood)
+    ctx.fillStyle = '#7a5a28'
+    ctx.fillRect(x - 9, y - 9, 18, 18)
+    // Clock face (cream)
+    ctx.fillStyle = '#fff8e8'
     ctx.fillRect(x - 7, y - 7, 14, 14)
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(x - 6, y - 6, 12, 12)
-    ctx.fillStyle = '#333333'
-    ctx.fillRect(x - 1, y - 5, 2, 1)
-    ctx.fillRect(x - 1, y + 4, 2, 1)
-    ctx.fillRect(x - 5, y - 1, 1, 2)
-    ctx.fillRect(x + 4, y - 1, 1, 2)
+    // Hour markers
+    ctx.fillStyle = '#5c3d1e'
+    ctx.fillRect(x - 1, y - 6, 2, 1)
+    ctx.fillRect(x - 1, y + 5, 2, 1)
+    ctx.fillRect(x - 6, y - 1, 1, 2)
+    ctx.fillRect(x + 5, y - 1, 1, 2)
 
-    const sec = this.frameCount / 30 // adjusted for 30fps
-    ctx.fillStyle = '#000000'
+    const sec = this.frameCount / 30
+    // Hour hand
+    ctx.fillStyle = '#3d2314'
     const hAngle = sec * 0.02
     const hhx = Math.cos(hAngle - Math.PI / 2) * 3
     const hhy = Math.sin(hAngle - Math.PI / 2) * 3
     ctx.fillRect(x + hhx - 0.5, y + hhy - 0.5, 2, 2)
+    // Minute hand
     const mAngle = sec * 0.2
     const mhx = Math.cos(mAngle - Math.PI / 2) * 4.5
     const mhy = Math.sin(mAngle - Math.PI / 2) * 4.5
     ctx.fillRect(x + mhx - 0.5, y + mhy - 0.5, 1.5, 1.5)
-    ctx.fillStyle = '#cc0000'
+    // Second hand (red)
+    ctx.fillStyle = '#cc3333'
     const sAngle = sec * 1.0
     const shx = Math.cos(sAngle - Math.PI / 2) * 5
     const shy = Math.sin(sAngle - Math.PI / 2) * 5
     ctx.fillRect(x + shx - 0.3, y + shy - 0.3, 1, 1)
-    ctx.fillStyle = '#000000'
+    // Center dot
+    ctx.fillStyle = '#3d2314'
     ctx.fillRect(x - 0.5, y - 0.5, 1.5, 1.5)
   }
 
@@ -830,82 +1043,74 @@ export class PixelAnimator {
     const { ctx } = this
     const w = CANVAS_W
 
-    // --- Wall enhancements: baseboard / kickboard ---
-    ctx.fillStyle = '#1f1f35'
-    ctx.fillRect(0, WALL_BOTTOM - 3, w, 3)
+    // --- Wall baseboard highlight ---
+    ctx.fillStyle = '#a08860'
+    ctx.fillRect(0, WALL_BOTTOM - 1, w, 1)
 
     // --- Top wall: AC vents ---
-    // AC vent left (between window1 and bulletin board)
     this.drawACVent(ctx, 115, 18)
-    // AC vent right (between clock area and window3)
     this.drawACVent(ctx, 510, 18)
 
     // --- Top wall: picture frames ---
-    this.drawPictureFrame(ctx, 260, 12, 30, 22, '#4a6070')
-    this.drawPictureFrame(ctx, 430, 15, 25, 18, '#705040')
+    this.drawPictureFrame(ctx, 260, 12, 30, 22, '#6a9080')
+    this.drawPictureFrame(ctx, 430, 15, 25, 18, '#907060')
 
-    // --- Left side: whiteboard / notice board (in work area) ---
+    // --- Left side: whiteboard ---
     this.drawWhiteboard(ctx, 4, WORK_TOP + 5)
 
     // --- Left side: floor plant ---
-    this.drawFloorPlant(ctx, 10, WORK_BOTTOM - 55)
+    this.drawFloorPlant(ctx, 10, this.workBottom - 55)
 
     // --- Right side: bookshelf ---
     this.drawBookshelf(ctx, w - 38, WORK_TOP + 8)
 
     // --- Right side: printer ---
-    this.drawPrinter(ctx, w - 35, WORK_BOTTOM - 35)
+    this.drawPrinter(ctx, w - 35, this.workBottom - 35)
 
-    // --- Bottom floor: carpet area ---
-    ctx.fillStyle = '#3a2e24'
-    ctx.fillRect(80, FLOOR_TOP + 5, 160, 50)
-    ctx.fillStyle = '#3e3228'
-    ctx.fillRect(82, FLOOR_TOP + 7, 156, 46)
-    // Carpet fringe
-    ctx.fillStyle = '#4a3a2e'
-    for (let i = 0; i < 156; i += 6) {
-      ctx.fillRect(82 + i, FLOOR_TOP + 7, 4, 2)
-      ctx.fillRect(82 + i, FLOOR_TOP + 51, 4, 2)
+    // --- Bottom floor: warm rug area ---
+    ctx.fillStyle = '#a06040'
+    ctx.fillRect(80, this.floorTop + 5, 160, 50)
+    ctx.fillStyle = '#c07050'
+    ctx.fillRect(82, this.floorTop + 7, 156, 46)
+    // Rug pattern (warm geometric)
+    ctx.fillStyle = '#d49060'
+    for (let i = 0; i < 156; i += 12) {
+      ctx.fillRect(82 + i, this.floorTop + 10, 8, 2)
+      ctx.fillRect(82 + i + 4, this.floorTop + 48, 8, 2)
     }
+    // Inner rug design
+    ctx.fillStyle = '#e8b080'
+    ctx.fillRect(100, this.floorTop + 20, 120, 2)
+    ctx.fillRect(100, this.floorTop + 42, 120, 2)
+    ctx.fillRect(100, this.floorTop + 20, 2, 24)
+    ctx.fillRect(218, this.floorTop + 20, 2, 24)
 
-    // --- Bottom floor: wire / cable traces ---
-    ctx.fillStyle = '#2a2a2a'
-    ctx.fillRect(280, FLOOR_TOP + 30, 80, 1)
-    ctx.fillRect(360, FLOOR_TOP + 28, 1, 12)
-    ctx.fillRect(360, FLOOR_TOP + 40, 40, 1)
-    // Another cable
-    ctx.fillStyle = '#333322'
-    ctx.fillRect(420, FLOOR_TOP + 45, 60, 1)
-    ctx.fillRect(480, FLOOR_TOP + 38, 1, 8)
+    // --- Floor: scattered details ---
+    // Small floor mat at entrance
+    ctx.fillStyle = '#8a7a60'
+    ctx.fillRect(CANVAS_W - 60, this.floorTop + 8, 20, 12)
+    ctx.fillStyle = '#9a8a70'
+    ctx.fillRect(CANVAS_W - 58, this.floorTop + 10, 16, 8)
 
-    // --- Corner: trash can (left bottom of work area) ---
-    this.drawTrashCan(ctx, 5, FLOOR_TOP + 12)
+    // --- Corner: trash can ---
+    this.drawTrashCan(ctx, 5, this.floorTop + 12)
 
-    // --- Corner: cardboard boxes (left floor area) ---
-    this.drawCardboardBoxes(ctx, 35, FLOOR_TOP + 15)
-
-    // --- Floor: water dispenser (left of boss door area) ---
-    // (water cooler already exists on right side, skip duplicate)
-
-    // --- Scattered: small floor details ---
-    // Small scuff marks on floor
-    ctx.fillStyle = '#35291f'
-    ctx.fillRect(200, FLOOR_TOP + 20, 3, 1)
-    ctx.fillRect(320, FLOOR_TOP + 35, 2, 1)
-    ctx.fillRect(500, FLOOR_TOP + 25, 4, 1)
+    // --- Corner: cardboard boxes ---
+    this.drawCardboardBoxes(ctx, 35, this.floorTop + 15)
   }
 
   private drawACVent(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // White rectangular AC vent with grille lines
-    ctx.fillStyle = '#cccccc'
+    // White AC unit with rounded top
+    ctx.fillStyle = '#f0f0f0'
     ctx.fillRect(x, y, 36, 10)
-    ctx.fillStyle = '#999999'
+    // Frame border
+    ctx.fillStyle = '#cccccc'
     ctx.fillRect(x, y, 36, 1)
     ctx.fillRect(x, y + 9, 36, 1)
     ctx.fillRect(x, y, 1, 10)
     ctx.fillRect(x + 35, y, 1, 10)
     // Grille slats
-    ctx.fillStyle = '#aaaaaa'
+    ctx.fillStyle = '#dddddd'
     for (let i = 0; i < 5; i++) {
       ctx.fillRect(x + 3 + i * 7, y + 3, 5, 1)
       ctx.fillRect(x + 3 + i * 7, y + 5, 5, 1)
@@ -914,44 +1119,48 @@ export class PixelAnimator {
   }
 
   private drawPictureFrame(ctx: CanvasRenderingContext2D, x: number, y: number, fw: number, fh: number, innerColor: string) {
-    // Dark frame border
-    ctx.fillStyle = '#333333'
-    ctx.fillRect(x, y, fw, fh)
+    // Wood frame
+    ctx.fillStyle = '#7a5a28'
+    ctx.fillRect(x - 1, y - 1, fw + 2, fh + 2)
     // Inner picture
     ctx.fillStyle = innerColor
     ctx.fillRect(x + 2, y + 2, fw - 4, fh - 4)
-    // Simple abstract art inside (a few colored pixels)
-    ctx.fillStyle = '#88aacc'
-    ctx.fillRect(x + 4, y + 5, (fw - 8) * 0.4, fh - 10)
-    ctx.fillStyle = '#aa8866'
-    ctx.fillRect(x + 4 + (fw - 8) * 0.4, y + 4, (fw - 8) * 0.3, fh - 8)
+    // Simple landscape art inside
+    ctx.fillStyle = '#90c8a0'
+    ctx.fillRect(x + 3, y + fh - 8, fw - 6, 5)
+    ctx.fillStyle = '#70a880'
+    ctx.fillRect(x + 4, y + fh - 10, 6, 4)
+    ctx.fillRect(x + fw - 12, y + fh - 12, 5, 6)
+    // Sky portion
+    ctx.fillStyle = '#a8d8f0'
+    ctx.fillRect(x + 3, y + 3, fw - 6, fh - 12)
   }
 
   private drawWhiteboard(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Board background
-    ctx.fillStyle = '#666666'
-    ctx.fillRect(x, y, 34, 50)
-    ctx.fillStyle = '#e8e8e0'
-    ctx.fillRect(x + 2, y + 2, 30, 46)
-    // Sticky notes on board
-    const noteColors = ['#c94040', '#c9a020', '#30a060', '#3070b0']
-    ctx.fillStyle = noteColors[0]
+    // Aluminum frame
+    ctx.fillStyle = '#c0c0c0'
+    ctx.fillRect(x - 1, y - 1, 36, 52)
+    // White board surface
+    ctx.fillStyle = '#f8f8f8'
+    ctx.fillRect(x + 1, y + 1, 32, 48)
+    // Sticky notes on board (colorful)
+    ctx.fillStyle = '#ff6b6b'
     ctx.fillRect(x + 4, y + 5, 10, 8)
-    ctx.fillStyle = noteColors[1]
+    ctx.fillStyle = '#ffd93d'
     ctx.fillRect(x + 17, y + 6, 12, 7)
-    ctx.fillStyle = noteColors[2]
+    ctx.fillStyle = '#77dd77'
     ctx.fillRect(x + 5, y + 18, 11, 8)
-    ctx.fillStyle = noteColors[3]
+    ctx.fillStyle = '#6bcfff'
     ctx.fillRect(x + 18, y + 20, 10, 7)
-    // Scribble lines (dark dots on notes)
-    ctx.fillStyle = '#222222'
+    // Scribble lines on notes
+    ctx.fillStyle = '#333333'
     ctx.fillRect(x + 5, y + 7, 6, 1)
     ctx.fillRect(x + 5, y + 9, 4, 1)
     ctx.fillRect(x + 18, y + 8, 8, 1)
     ctx.fillRect(x + 6, y + 20, 7, 1)
     ctx.fillRect(x + 19, y + 22, 6, 1)
     // Bottom: marker tray
-    ctx.fillStyle = '#555555'
+    ctx.fillStyle = '#999999'
     ctx.fillRect(x + 3, y + 44, 28, 3)
     ctx.fillStyle = '#cc3333'
     ctx.fillRect(x + 6, y + 43, 4, 2)
@@ -962,29 +1171,33 @@ export class PixelAnimator {
   }
 
   private drawFloorPlant(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Pot
-    ctx.fillStyle = '#5d3a1a'
-    ctx.fillRect(x, y + 28, 16, 18)
-    ctx.fillRect(x + 2, y + 26, 12, 3)
+    // Terracotta pot
+    ctx.fillStyle = '#b86840'
+    ctx.fillRect(x + 2, y + 28, 12, 16)
+    ctx.fillStyle = '#cc7850'
+    ctx.fillRect(x + 3, y + 26, 10, 3)
+    // Rim highlight
+    ctx.fillStyle = '#d89070'
+    ctx.fillRect(x + 3, y + 26, 10, 1)
     // Soil
-    ctx.fillStyle = '#3d2510'
+    ctx.fillStyle = '#5a3820'
     ctx.fillRect(x + 3, y + 27, 10, 2)
     // Leaves with sway animation
     const sway = Math.sin(this.frameCount * 0.03) * 1.5
-    ctx.fillStyle = '#2d6a3e'
     // Main stem
+    ctx.fillStyle = '#4a8a3a'
     ctx.fillRect(x + 7, y + 8, 2, 20)
-    // Leaves
-    ctx.fillStyle = '#2d8a4e'
+    // Leaves (lush green)
+    ctx.fillStyle = '#5aaa50'
     ctx.fillRect(x + 3 + sway, y + 6, 5, 4)
     ctx.fillRect(x + 9 - sway, y + 4, 5, 4)
     ctx.fillRect(x + 2 + sway * 0.7, y + 12, 5, 3)
     ctx.fillRect(x + 10 - sway * 0.7, y + 10, 5, 3)
-    ctx.fillStyle = '#3aa060'
+    ctx.fillStyle = '#6cc060'
     ctx.fillRect(x + 5 + sway * 0.5, y + 2, 4, 3)
     ctx.fillRect(x + 7 - sway * 0.5, y + 8, 4, 3)
     // Leaf highlights
-    ctx.fillStyle = '#4ac878'
+    ctx.fillStyle = '#88e080'
     ctx.fillRect(x + 4 + sway, y + 7, 2, 1)
     ctx.fillRect(x + 10 - sway, y + 5, 2, 1)
   }
@@ -992,97 +1205,105 @@ export class PixelAnimator {
   private drawBookshelf(ctx: CanvasRenderingContext2D, x: number, y: number) {
     const shelfW = 30
     const shelfH = 80
-    // Back panel
-    ctx.fillStyle = '#5a3a1a'
+    // Back panel (warm wood)
+    ctx.fillStyle = '#8b6030'
     ctx.fillRect(x, y, shelfW, shelfH)
-    // Shelves (4 levels)
-    ctx.fillStyle = '#7a4a20'
+    // Side edges
+    ctx.fillStyle = '#7a5020'
+    ctx.fillRect(x, y, 2, shelfH)
+    ctx.fillRect(x + shelfW - 2, y, 2, shelfH)
+    // Shelves (4 levels - lighter wood)
+    ctx.fillStyle = '#a07030'
     for (let i = 0; i < 4; i++) {
       ctx.fillRect(x, y + 18 * i + 18, shelfW, 3)
     }
-    // Books on shelves
-    const bookColors = ['#8b2020', '#1a4a8b', '#2a7a3a', '#8b6b20', '#5a2a7a', '#2a6a6a', '#7a3a50']
+    // Books on shelves (colorful like Stardew Valley)
+    const bookColors = ['#cc4444', '#4488bb', '#44aa55', '#cc8830', '#8855aa', '#449999', '#aa5577']
     for (let shelf = 0; shelf < 3; shelf++) {
       const shelfY = y + shelf * 18 + 2
-      let bx = x + 2
+      let bx = x + 3
       for (let b = 0; b < 4 + (shelf % 2); b++) {
         const bw = 3 + (b % 3)
         const bh = 12 + (b % 2) * 3
         ctx.fillStyle = bookColors[(shelf * 5 + b) % bookColors.length]
         ctx.fillRect(bx, shelfY + (15 - bh), bw, bh)
+        // Book spine highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.15)'
+        ctx.fillRect(bx, shelfY + (15 - bh), 1, bh)
         bx += bw + 1
         if (bx > x + shelfW - 4) break
       }
     }
-    // Bottom shelf: a small box/binder
-    ctx.fillStyle = '#4a4a4a'
-    ctx.fillRect(x + 3, y + 58, 10, 14)
+    // Bottom shelf: binder
     ctx.fillStyle = '#6a6a6a'
+    ctx.fillRect(x + 3, y + 58, 10, 14)
+    ctx.fillStyle = '#888888'
     ctx.fillRect(x + 15, y + 60, 8, 12)
   }
 
   private drawPrinter(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Printer body
-    ctx.fillStyle = '#cccccc'
+    // Printer body (white/cream)
+    ctx.fillStyle = '#f0f0e8'
     ctx.fillRect(x, y, 28, 18)
-    ctx.fillStyle = '#b0b0b0'
+    // Top edge
+    ctx.fillStyle = '#e0e0d8'
     ctx.fillRect(x + 1, y + 1, 26, 2)
-    // Paper tray
-    ctx.fillStyle = '#dddddd'
+    // Paper tray (raised)
+    ctx.fillStyle = '#e8e8e0'
     ctx.fillRect(x + 4, y - 3, 20, 4)
     // Paper in tray
-    ctx.fillStyle = '#f5f5f0'
+    ctx.fillStyle = '#ffffff'
     ctx.fillRect(x + 6, y - 2, 16, 2)
     // Status LED
     const ledOn = this.frameCount % 90 < 60
-    ctx.fillStyle = ledOn ? '#33cc33' : '#336633'
+    ctx.fillStyle = ledOn ? '#44cc44' : '#448844'
     ctx.fillRect(x + 22, y + 4, 3, 2)
     // Output slot
-    ctx.fillStyle = '#999999'
+    ctx.fillStyle = '#c8c8c0'
     ctx.fillRect(x + 3, y + 12, 22, 2)
     // Legs
-    ctx.fillStyle = '#888888'
+    ctx.fillStyle = '#aaaaaa'
     ctx.fillRect(x + 3, y + 18, 3, 4)
     ctx.fillRect(x + 22, y + 18, 3, 4)
   }
 
   private drawTrashCan(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Body
-    ctx.fillStyle = '#5a5a5a'
+    // Metal trash can (lighter)
+    ctx.fillStyle = '#a0a098'
     ctx.fillRect(x, y + 4, 14, 22)
     // Rim
-    ctx.fillStyle = '#6a6a6a'
+    ctx.fillStyle = '#b0b0a8'
     ctx.fillRect(x - 1, y + 2, 16, 3)
     // Lid handle
-    ctx.fillStyle = '#777777'
+    ctx.fillStyle = '#c0c0b8'
     ctx.fillRect(x + 5, y, 4, 3)
-    // Lines on body
-    ctx.fillStyle = '#4a4a4a'
+    // Body lines
+    ctx.fillStyle = '#8a8a82'
     ctx.fillRect(x + 4, y + 6, 1, 18)
     ctx.fillRect(x + 9, y + 6, 1, 18)
   }
 
   private drawCardboardBoxes(ctx: CanvasRenderingContext2D, x: number, y: number) {
-    // Box 1 (larger, bottom)
-    ctx.fillStyle = '#8a6530'
+    // Box 1 (larger, bottom) - warm cardboard
+    ctx.fillStyle = '#c8a050'
     ctx.fillRect(x, y + 10, 20, 16)
-    ctx.fillStyle = '#9a7540'
+    ctx.fillStyle = '#d8b060'
     ctx.fillRect(x + 1, y + 11, 18, 14)
     // Tape
-    ctx.fillStyle = '#b8a060'
+    ctx.fillStyle = '#e8c880'
     ctx.fillRect(x + 8, y + 10, 4, 16)
     // Box 2 (smaller, on top)
-    ctx.fillStyle = '#7a5520'
+    ctx.fillStyle = '#b89040'
     ctx.fillRect(x + 3, y, 14, 11)
-    ctx.fillStyle = '#8a6530'
+    ctx.fillStyle = '#c8a050'
     ctx.fillRect(x + 4, y + 1, 12, 9)
     // Tape on top box
-    ctx.fillStyle = '#b8a060'
+    ctx.fillStyle = '#e8c880'
     ctx.fillRect(x + 9, y, 3, 11)
     // Box 3 (tiny, beside)
-    ctx.fillStyle = '#6a4a18'
+    ctx.fillStyle = '#a88030'
     ctx.fillRect(x + 22, y + 18, 10, 8)
-    ctx.fillStyle = '#7a5a28'
+    ctx.fillStyle = '#b89040'
     ctx.fillRect(x + 23, y + 19, 8, 6)
   }
 
@@ -1092,55 +1313,52 @@ export class PixelAnimator {
     const { x, y } = ws
 
     if (isSpritesReady()) {
-      // Sprite mode: sprite frames (102x128) already contain complete workstation scene
-      // (character + desk + monitor + chair), skip all programmatic furniture
       this.drawPersonWithAction(x, y, ws)
       return
     }
 
-    // === Fallback mode: programmatic drawing when sprites not loaded ===
-    const deskW = 52, deskH = 10
-    const deskX = x - 2, deskY = y + 54
+    // === Fallback mode: Stardew Valley style programmatic drawing ===
+    const s = this.personScale
+    const deskW = Math.round(52 * s), deskH = Math.round(10 * s)
+    const deskX = x - Math.round(2 * s), deskY = y + Math.round(54 * s)
 
-    // Chair (ergonomic)
+    // Chair (blue office chair - Stardew style)
+    ctx.fillStyle = SV_PALETTE.chair[0]
+    ctx.fillRect(x + Math.round(14 * s), y + Math.round(56 * s), Math.round(18 * s), Math.round(8 * s))
+    ctx.fillStyle = SV_PALETTE.chair[1]
+    ctx.fillRect(x + Math.round(14 * s), y + Math.round(64 * s), Math.round(20 * s), Math.round(3 * s))
+    // Chair support
+    ctx.fillStyle = '#4a4a4a'
+    ctx.fillRect(x + Math.round(22 * s), y + Math.round(67 * s), Math.round(4 * s), Math.round(8 * s))
+    // Chair base/wheels
     ctx.fillStyle = '#3a3a3a'
-    ctx.fillRect(x + 14, y + 64, 20, 18) // seat
-    ctx.fillStyle = '#444444'
-    ctx.fillRect(x + 15, y + 56, 18, 10) // backrest
-    ctx.fillStyle = '#555555'
-    ctx.fillRect(x + 16, y + 57, 16, 8) // backrest inner
-    // Chair wheels
+    ctx.fillRect(x + Math.round(17 * s), y + Math.round(75 * s), Math.round(14 * s), Math.round(3 * s))
     ctx.fillStyle = '#2a2a2a'
-    ctx.fillRect(x + 15, y + 82, 3, 2)
-    ctx.fillRect(x + 22, y + 83, 4, 2)
-    ctx.fillRect(x + 30, y + 82, 3, 2)
-    // Chair stem
-    ctx.fillStyle = '#333333'
-    ctx.fillRect(x + 22, y + 79, 4, 4)
+    ctx.fillRect(x + Math.round(16 * s), y + Math.round(77 * s), Math.round(3 * s), Math.round(2 * s))
+    ctx.fillRect(x + Math.round(29 * s), y + Math.round(77 * s), Math.round(3 * s), Math.round(2 * s))
 
-    // Desk surface with wood texture
-    ctx.fillStyle = '#a0784c'
+    // Desk surface (warm wood with thickness)
+    ctx.fillStyle = SV_PALETTE.deskWood[0]
     ctx.fillRect(deskX, deskY, deskW, deskH)
+    // Desk front edge (darker)
+    ctx.fillStyle = SV_PALETTE.deskWood[1]
+    ctx.fillRect(deskX, deskY + deskH - Math.round(3 * s), deskW, Math.round(3 * s))
     // Wood grain lines
-    ctx.fillStyle = '#b08860'
-    for (let i = 0; i < deskW; i += 8) {
-      ctx.fillRect(deskX + i, deskY + 3, 6, 1)
-      ctx.fillRect(deskX + i + 2, deskY + 6, 5, 1)
+    ctx.fillStyle = 'rgba(180, 140, 80, 0.3)'
+    for (let i = 0; i < deskW; i += Math.round(8 * s)) {
+      ctx.fillRect(deskX + i, deskY + Math.round(2 * s), Math.round(6 * s), 1)
+      ctx.fillRect(deskX + i + Math.round(3 * s), deskY + Math.round(5 * s), Math.round(4 * s), 1)
     }
-    ctx.fillStyle = '#8b6914'
-    ctx.fillRect(deskX, deskY + deskH - 2, deskW, 2)
     // Desk legs
-    ctx.fillStyle = '#6b4f10'
-    ctx.fillRect(deskX + 3, deskY + deskH, 4, 16)
-    ctx.fillRect(deskX + deskW - 7, deskY + deskH, 4, 16)
+    ctx.fillStyle = SV_PALETTE.deskWood[2]
+    ctx.fillRect(deskX + Math.round(3 * s), deskY + deskH, Math.round(4 * s), Math.round(16 * s))
+    ctx.fillRect(deskX + deskW - Math.round(7 * s), deskY + deskH, Math.round(4 * s), Math.round(16 * s))
 
-    // Monitor (larger: 24x18)
-    const monX = x + 12, monY = y + 20
-    // Monitor bezel
-    ctx.fillStyle = '#1a1a2e'
-    ctx.fillRect(monX, monY, 24, 18)
-    ctx.fillStyle = '#252540'
-    ctx.fillRect(monX + 1, monY + 1, 22, 1) // top bezel shine
+    // Monitor (thin black frame with colored screen)
+    const monX = x + Math.round(12 * s), monY = y + Math.round(20 * s)
+    const monW = Math.round(24 * s), monH = Math.round(18 * s)
+    ctx.fillStyle = '#2a2a2a'
+    ctx.fillRect(monX, monY, monW, monH)
 
     // Screen content based on action
     const ps = this.personStates.get(ws.name)
@@ -1148,66 +1366,57 @@ export class PixelAnimator {
     const isTyping = ps?.currentAction === 'typing' || ps?.currentAction === 'typing_fast'
 
     if (isSlacking) {
-      // Colorful video content
-      const colors = ['#ff4466', '#44ff66', '#4488ff', '#ffdd44', '#ff66ff']
-      for (let i = 0; i < 5; i++) {
-        ctx.fillStyle = colors[(i + Math.floor(this.frameCount / 4)) % colors.length]
-        ctx.fillRect(monX + 2, monY + 2 + i * 3, 20, 3)
+      ctx.fillStyle = '#4488cc'
+      ctx.fillRect(monX + 2, monY + 2, monW - 4, monH - 4)
+      // Video content (colorful bars)
+      const colors = ['#ff6688', '#66ff88', '#6688ff', '#ffdd66']
+      for (let i = 0; i < 4; i++) {
+        ctx.fillStyle = colors[(i + Math.floor(this.frameCount / 6)) % colors.length]
+        ctx.fillRect(monX + 3, monY + 3 + i * Math.round(3 * s), monW - 6, Math.round(2.5 * s))
       }
     } else if (isTyping) {
-      // Scrolling green code lines
-      ctx.fillStyle = '#0a1a0a'
-      ctx.fillRect(monX + 2, monY + 2, 20, 14)
-      ctx.fillStyle = '#00ff88'
-      const scrollOff = Math.floor(this.frameCount / 3) % 4
+      // Dark IDE with code lines
+      ctx.fillStyle = '#1e1e2e'
+      ctx.fillRect(monX + 2, monY + 2, monW - 4, monH - 4)
+      ctx.fillStyle = '#88cc88'
+      const scrollOff = Math.floor(this.frameCount / 4) % 4
       for (let i = 0; i < 5; i++) {
-        const lw = 4 + ((i * 3 + simpleHash(ws.name) + scrollOff) % 12)
-        const ly = monY + 3 + i * 3 - scrollOff
-        if (ly >= monY + 2 && ly < monY + 15) {
-          ctx.fillRect(monX + 4, ly, Math.min(lw, 16), 1)
+        const lw = 4 + ((i * 3 + simpleHash(ws.name) + scrollOff) % 10)
+        const ly = monY + 3 + i * Math.round(3 * s) - scrollOff
+        if (ly >= monY + 2 && ly < monY + monH - 3) {
+          ctx.fillRect(monX + 4, ly, Math.min(lw, monW - 8), 1)
         }
       }
       // Cursor blink
       if (this.frameCount % 16 < 10) {
-        ctx.fillStyle = '#00ff88'
-        ctx.fillRect(monX + 5 + (this.frameCount % 14), monY + 12, 1, 2)
+        ctx.fillStyle = '#88cc88'
+        ctx.fillRect(monX + 5 + (this.frameCount % 12), monY + monH - 6, 1, 2)
       }
     } else {
-      // Idle screen saver - moving light dot
-      const screenColor = ws.bugCount >= 8 ? '#ff4444' : ws.bugCount >= 5 ? '#ffaa00' : '#0a2a1a'
+      // Idle: blue screen or alert
+      const screenColor = ws.bugCount >= 8 ? '#884444' : ws.bugCount >= 5 ? '#886644' : '#4488cc'
       ctx.fillStyle = screenColor
-      ctx.fillRect(monX + 2, monY + 2, 20, 14)
-      // Bouncing dot
-      const dotX = monX + 4 + Math.abs(((this.frameCount / 2 + simpleHash(ws.name)) % 16) - 8)
-      const dotY = monY + 4 + Math.abs(((this.frameCount / 3 + simpleHash(ws.name) * 2) % 10) - 5)
-      ctx.fillStyle = ws.bugCount >= 8 ? '#ff8888' : '#00ff88'
-      ctx.fillRect(dotX, dotY, 3, 3)
-      ctx.fillStyle = ws.bugCount >= 8 ? '#ff6666' : '#00cc66'
-      ctx.fillRect(dotX + 1, dotY + 1, 1, 1)
+      ctx.fillRect(monX + 2, monY + 2, monW - 4, monH - 4)
     }
 
-    // Screen sparkle
-    if (this.frameCount % 100 < 2) {
-      ctx.fillStyle = 'rgba(255,255,255,0.8)'
-      ctx.fillRect(monX + 3, monY + 3, 2, 1)
-    }
-
-    // Monitor stand and base
-    ctx.fillStyle = '#1a1a2e'
-    ctx.fillRect(monX + 9, monY + 18, 6, 5) // stand neck
-    ctx.fillRect(monX + 6, monY + 22, 12, 3) // stand base
-    ctx.fillStyle = '#252540'
-    ctx.fillRect(monX + 7, monY + 22, 10, 1) // base shine
-
-    // Keyboard (wider)
-    ctx.fillStyle = '#2a2a2a'
-    ctx.fillRect(x + 10, deskY - 7, 28, 7)
+    // Monitor stand
     ctx.fillStyle = '#3a3a3a'
+    ctx.fillRect(monX + Math.round(9 * s), monY + monH, Math.round(6 * s), Math.round(5 * s))
+    ctx.fillRect(monX + Math.round(6 * s), monY + monH + Math.round(4 * s), Math.round(12 * s), Math.round(2 * s))
+
+    // Keyboard
+    ctx.fillStyle = '#e8e8e0'
+    ctx.fillRect(x + Math.round(10 * s), deskY - Math.round(7 * s), Math.round(28 * s), Math.round(6 * s))
+    ctx.fillStyle = '#d0d0c8'
     for (let row = 0; row < 2; row++) {
       for (let i = 0; i < 6; i++) {
-        ctx.fillRect(x + 12 + i * 4, deskY - 6 + row * 3, 3, 2)
+        ctx.fillRect(x + Math.round((12 + i * 4) * s), deskY - Math.round((6 - row * 3) * s), Math.round(3 * s), Math.round(2 * s))
       }
     }
+
+    // Mouse
+    ctx.fillStyle = '#e0e0d8'
+    ctx.fillRect(x + Math.round(40 * s), deskY - Math.round(5 * s), Math.round(4 * s), Math.round(3 * s))
 
     // Decorations
     ws.decorations.forEach((deco, i) => {
@@ -1215,7 +1424,7 @@ export class PixelAnimator {
     })
 
     // Person with action system (fallback procedural)
-    this.drawPersonWithAction(x + 9, y + 30, ws)
+    this.drawPersonWithAction(x + Math.round(9 * s), y + Math.round(30 * s), ws)
   }
 
   /** Draw workstation furniture only (no person) - used during user whip animation */
@@ -1224,55 +1433,45 @@ export class PixelAnimator {
     const { x, y } = ws
 
     if (isSpritesReady()) {
-      // In sprite mode, we can't easily separate person from workstation
-      // Just skip drawing entirely - the person is drawn by drawUserWhip
       return
     }
 
-    const deskW = 52, deskH = 10
-    const deskX = x - 2, deskY = y + 54
+    const s = this.personScale
+    const deskW = Math.round(52 * s), deskH = Math.round(10 * s)
+    const deskX = x - Math.round(2 * s), deskY = y + Math.round(54 * s)
 
     // Chair (pushed back slightly)
+    ctx.fillStyle = SV_PALETTE.chair[0]
+    ctx.fillRect(x + Math.round(16 * s), y + Math.round(58 * s), Math.round(18 * s), Math.round(8 * s))
+    ctx.fillStyle = SV_PALETTE.chair[1]
+    ctx.fillRect(x + Math.round(16 * s), y + Math.round(66 * s), Math.round(20 * s), Math.round(3 * s))
+    ctx.fillStyle = '#4a4a4a'
+    ctx.fillRect(x + Math.round(24 * s), y + Math.round(69 * s), Math.round(4 * s), Math.round(8 * s))
     ctx.fillStyle = '#3a3a3a'
-    ctx.fillRect(x + 16, y + 66, 20, 18)
-    ctx.fillStyle = '#444444'
-    ctx.fillRect(x + 17, y + 58, 18, 10)
-    ctx.fillStyle = '#555555'
-    ctx.fillRect(x + 18, y + 59, 16, 8)
-    ctx.fillStyle = '#2a2a2a'
-    ctx.fillRect(x + 17, y + 84, 3, 2)
-    ctx.fillRect(x + 24, y + 85, 4, 2)
-    ctx.fillRect(x + 32, y + 84, 3, 2)
-    ctx.fillStyle = '#333333'
-    ctx.fillRect(x + 24, y + 81, 4, 4)
+    ctx.fillRect(x + Math.round(19 * s), y + Math.round(77 * s), Math.round(14 * s), Math.round(3 * s))
 
     // Desk
-    ctx.fillStyle = '#a0784c'
+    ctx.fillStyle = SV_PALETTE.deskWood[0]
     ctx.fillRect(deskX, deskY, deskW, deskH)
-    ctx.fillStyle = '#b08860'
-    for (let i = 0; i < deskW; i += 8) {
-      ctx.fillRect(deskX + i, deskY + 3, 6, 1)
-      ctx.fillRect(deskX + i + 2, deskY + 6, 5, 1)
-    }
-    ctx.fillStyle = '#8b6914'
-    ctx.fillRect(deskX, deskY + deskH - 2, deskW, 2)
-    ctx.fillStyle = '#6b4f10'
-    ctx.fillRect(deskX + 3, deskY + deskH, 4, 16)
-    ctx.fillRect(deskX + deskW - 7, deskY + deskH, 4, 16)
+    ctx.fillStyle = SV_PALETTE.deskWood[1]
+    ctx.fillRect(deskX, deskY + deskH - Math.round(3 * s), deskW, Math.round(3 * s))
+    ctx.fillStyle = SV_PALETTE.deskWood[2]
+    ctx.fillRect(deskX + Math.round(3 * s), deskY + deskH, Math.round(4 * s), Math.round(16 * s))
+    ctx.fillRect(deskX + deskW - Math.round(7 * s), deskY + deskH, Math.round(4 * s), Math.round(16 * s))
 
     // Monitor
-    const monX = x + 12, monY = y + 20
-    ctx.fillStyle = '#1a1a2e'
-    ctx.fillRect(monX, monY, 24, 18)
-    ctx.fillStyle = '#0a2a1a'
-    ctx.fillRect(monX + 2, monY + 2, 20, 14)
-    ctx.fillStyle = '#1a1a2e'
-    ctx.fillRect(monX + 9, monY + 18, 6, 5)
-    ctx.fillRect(monX + 6, monY + 22, 12, 3)
+    const monX = x + Math.round(12 * s), monY = y + Math.round(20 * s)
+    ctx.fillStyle = '#2a2a2a'
+    ctx.fillRect(monX, monY, Math.round(24 * s), Math.round(18 * s))
+    ctx.fillStyle = '#4488cc'
+    ctx.fillRect(monX + 2, monY + 2, Math.round(24 * s) - 4, Math.round(18 * s) - 4)
+    ctx.fillStyle = '#3a3a3a'
+    ctx.fillRect(monX + Math.round(9 * s), monY + Math.round(18 * s), Math.round(6 * s), Math.round(5 * s))
+    ctx.fillRect(monX + Math.round(6 * s), monY + Math.round(22 * s), Math.round(12 * s), Math.round(2 * s))
 
     // Keyboard
-    ctx.fillStyle = '#2a2a2a'
-    ctx.fillRect(x + 10, deskY - 7, 28, 7)
+    ctx.fillStyle = '#e8e8e0'
+    ctx.fillRect(x + Math.round(10 * s), deskY - Math.round(7 * s), Math.round(28 * s), Math.round(6 * s))
 
     // Decorations
     ws.decorations.forEach((deco, i) => {
@@ -1311,14 +1510,14 @@ export class PixelAnimator {
       }
     }
 
-    // Fallback: fillRect rendering
+    // Fallback: fillRect rendering (Stardew Valley style)
     switch (deco) {
       case 'plant':
-        ctx.fillStyle = '#8B4513'
+        ctx.fillStyle = '#b86840'
         ctx.fillRect(ox, deskY - 6, 6, 5)
-        ctx.fillStyle = '#228B22'
+        ctx.fillStyle = '#5aaa50'
         ctx.fillRect(ox + 1, deskY - 10, 4, 5)
-        ctx.fillStyle = '#32CD32'
+        ctx.fillStyle = '#6cc060'
         ctx.fillRect(ox + 2, deskY - 12, 2, 3)
         break
       case 'catToy':
@@ -1330,9 +1529,12 @@ export class PixelAnimator {
         ctx.fillRect(ox + 3, deskY - 9, 1, 1)
         break
       case 'coffee':
-        ctx.fillStyle = '#D2691E'
+        ctx.fillStyle = '#f5f5f5'
         ctx.fillRect(ox, deskY - 6, 5, 5)
         ctx.fillStyle = '#8B4513'
+        ctx.fillRect(ox + 1, deskY - 5, 3, 2)
+        // Cup handle
+        ctx.fillStyle = '#f5f5f5'
         ctx.fillRect(ox + 5, deskY - 4, 2, 3)
         if (this.frameCount % 20 < 10) {
           ctx.fillStyle = 'rgba(255,255,255,0.4)'
@@ -1342,33 +1544,36 @@ export class PixelAnimator {
         }
         break
       case 'frame':
-        ctx.fillStyle = '#4169E1'
+        ctx.fillStyle = '#7a5a28'
         ctx.fillRect(ox, deskY - 8, 7, 7)
         ctx.fillStyle = '#87CEEB'
         ctx.fillRect(ox + 1, deskY - 7, 5, 5)
         break
       case 'lamp':
-        ctx.fillStyle = '#333333'
+        ctx.fillStyle = '#555555'
         ctx.fillRect(ox + 2, deskY - 5, 2, 5)
-        ctx.fillStyle = '#FFD700'
+        ctx.fillStyle = '#44aa66'
         ctx.fillRect(ox, deskY - 9, 6, 4)
+        // Lamp glow
+        ctx.fillStyle = 'rgba(255, 240, 180, 0.1)'
+        ctx.fillRect(ox - 2, deskY - 6, 10, 8)
         break
       case 'waterCup':
-        ctx.fillStyle = 'rgba(100,149,237,0.8)'
+        ctx.fillStyle = 'rgba(135,206,250,0.8)'
         ctx.fillRect(ox, deskY - 6, 4, 6)
-        ctx.fillStyle = 'rgba(135,206,250,0.6)'
+        ctx.fillStyle = 'rgba(200,230,255,0.6)'
         ctx.fillRect(ox + 1, deskY - 4, 2, 3)
         break
       case 'snack':
-        ctx.fillStyle = '#FF6347'
+        ctx.fillStyle = '#ff8844'
         ctx.fillRect(ox, deskY - 5, 6, 4)
-        ctx.fillStyle = '#FFD700'
+        ctx.fillStyle = '#ffcc44'
         ctx.fillRect(ox + 1, deskY - 4, 4, 2)
         break
       case 'figure':
-        ctx.fillStyle = index === 0 ? '#FF4500' : '#1E90FF'
+        ctx.fillStyle = index === 0 ? '#FF6347' : '#4a90d9'
         ctx.fillRect(ox + 1, deskY - 8, 4, 5)
-        ctx.fillStyle = '#FFE4C4'
+        ctx.fillStyle = '#ffdbac'
         ctx.fillRect(ox + 1, deskY - 10, 4, 2)
         break
     }
@@ -1386,12 +1591,13 @@ export class PixelAnimator {
       // x, y here are ws.x, ws.y (workstation origin)
       const anim = ps ? getAnimForAction(ps.currentAction) : IDLE
       const elapsed = ps ? (performance.now() - ps.animStartTime) : (performance.now() - this.startTime)
-      // Scale: 102*0.45≈46px wide, 128*0.45≈58px tall
-      const spriteDrawW = 102 * SPRITE_SCALE
+      // Scale: apply personScale for dense layouts
+      const scale = BASE_SPRITE_SCALE * this.personScale
+      const spriteDrawW = 102 * scale
       // Center sprite horizontally in workstation slot (desk area ~48px wide)
       const drawX = x + 24 - spriteDrawW / 2
       const drawY = y
-      spriteSheet.drawAnimation(this.ctx, anim, drawX, drawY, elapsed, SPRITE_SCALE)
+      spriteSheet.drawAnimation(this.ctx, anim, drawX, drawY, elapsed, scale)
 
       // Draw action effects on top (chat bubble, sweat, sparks)
       if (ps) {
@@ -1410,14 +1616,14 @@ export class PixelAnimator {
   }
 
   // Procedural person drawing (fallback when sprites not loaded)
-  // Character size: ~22w × 30h pixels (enhanced pixel-art proportions)
+  // Stardew Valley style: larger head, rounder, warm colors
   private drawPersonProcedural(x: number, y: number, ws: Workstation, ps: PersonState) {
     const { ctx } = this
     const app = ws.appearance
     const action = ps.currentAction
     const blend = ps.transitionFrame > 0 ? (10 - ps.transitionFrame) / 10 : 1
 
-    // Breathing animation (offset entire body slightly in Y)
+    // Breathing animation
     const breathPhase = Math.sin(this.frameCount * 0.05 + simpleHash(ws.name) * 0.1) * 0.8
     const breathOffset = Math.round(breathPhase)
 
@@ -1426,14 +1632,18 @@ export class PixelAnimator {
     if (action === 'chatting') headOffX = 1
     if (action === 'yawning') headOffY = -1
     if (action === 'stretching') headOffY = -2
-    if (action === 'slacking' && (this.frameCount % 90) < 8) headOffX = -2 // look back
+    if (action === 'slacking' && (this.frameCount % 90) < 8) headOffX = -2
     headOffX = Math.round(headOffX * blend)
     headOffY = Math.round(headOffY * blend)
 
     const hx = x + 3 + headOffX
     const hy = y + headOffY + breathOffset
 
-    // === Hair (Y=0~4, 5px high) ===
+    // === Shadow under character ===
+    ctx.fillStyle = 'rgba(60, 40, 20, 0.12)'
+    ctx.fillRect(hx + 2, hy + 28, 12, 2)
+
+    // === Hair (Y=0~4) ===
     ctx.fillStyle = app.hairColor
     const hairDark = this.darkenColor(app.hairColor, 0.7)
     switch (app.hairStyle) {
@@ -1512,40 +1722,68 @@ export class PixelAnimator {
 
     // Headphones accessory
     if (app.accessory === 'headphones') {
-      ctx.fillStyle = '#333333'
+      ctx.fillStyle = '#444444'
       ctx.fillRect(hx + 1, hy + 6, 2, 4)
       ctx.fillRect(hx + 13, hy + 6, 2, 4)
-      ctx.fillStyle = '#555555'
-      ctx.fillRect(hx + 2, hy + 3, 12, 2) // headband
+      ctx.fillStyle = '#666666'
+      ctx.fillRect(hx + 2, hy + 3, 12, 2)
     }
 
-    // Eyebrows
+    // Blush / Cheeks (subtle pink)
+    ctx.fillStyle = 'rgba(255, 130, 130, 0.25)'
+    ctx.fillRect(hx + 3, hy + 10, 2, 2)
+    ctx.fillRect(hx + 11, hy + 10, 2, 2)
+
+    // Eyebrows (expressive based on state)
     ctx.fillStyle = this.darkenColor(app.hairColor, 0.6)
-    if (action === 'scratching' || ws.state === 'anxious') {
-      // Furrowed brows
+    if (action === 'scratching' || ws.state === 'anxious' || ws.state === 'crazy') {
+      // Furrowed brows (angled inward)
+      ctx.fillRect(hx + 4, hy + 7, 3, 1)
+      ctx.fillRect(hx + 5, hy + 6, 2, 1)
+      ctx.fillRect(hx + 9, hy + 7, 3, 1)
+      ctx.fillRect(hx + 9, hy + 6, 2, 1)
+    } else if (ws.state === 'collapse') {
+      // Drooping brows
+      ctx.fillRect(hx + 4, hy + 7, 3, 1)
+      ctx.fillRect(hx + 4, hy + 6, 1, 1)
+      ctx.fillRect(hx + 9, hy + 7, 3, 1)
+      ctx.fillRect(hx + 11, hy + 6, 1, 1)
+    } else if (ws.state === 'idle' || ws.state === 'relaxed') {
+      // Relaxed brows (slightly raised)
       ctx.fillRect(hx + 4, hy + 6, 3, 1)
       ctx.fillRect(hx + 9, hy + 6, 3, 1)
     } else {
+      // Normal brows
       ctx.fillRect(hx + 4, hy + 6, 3, 1)
       ctx.fillRect(hx + 9, hy + 6, 3, 1)
     }
 
-    // Eyes (action-dependent)
-    ctx.fillStyle = '#1a1a1a'
-    const blink = this.frameCount % 60 > 57
+    // Eyes (Stardew Valley style - large and expressive)
+    const blink = this.frameCount % 180 < 5
     if (action === 'yawning') {
-      // Squinted ~ shape eyes
+      ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 4, hy + 8, 3, 1)
       ctx.fillRect(hx + 9, hy + 8, 3, 1)
     } else if (action === 'phone') {
+      ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 4, hy + 9, 3, 2)
       ctx.fillRect(hx + 9, hy + 9, 3, 2)
     } else if (blink) {
+      ctx.fillStyle = app.skinTone
+      ctx.fillRect(hx + 4, hy + 7, 3, 3)
+      ctx.fillRect(hx + 9, hy + 7, 3, 3)
+      ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 4, hy + 8, 3, 1)
       ctx.fillRect(hx + 9, hy + 8, 3, 1)
     } else {
+      // Eye whites
+      ctx.fillStyle = '#ffffff'
       ctx.fillRect(hx + 4, hy + 7, 3, 3)
       ctx.fillRect(hx + 9, hy + 7, 3, 3)
+      // Pupils
+      ctx.fillStyle = '#2a2a2a'
+      ctx.fillRect(hx + 5, hy + 8, 2, 2)
+      ctx.fillRect(hx + 10, hy + 8, 2, 2)
       // Pupil highlight
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(hx + 5, hy + 7, 1, 1)
@@ -1563,7 +1801,7 @@ export class PixelAnimator {
       ctx.fillRect(hx + 9, hy + 8, 3, 1) // right lens
     }
 
-    // Mouth (action-dependent)
+    // Mouth (action & state dependent, more expressive)
     if (action === 'yawning') {
       const mouthOpen = this.frameCount % 16 < 8
       ctx.fillStyle = '#1a1a1a'
@@ -1577,15 +1815,33 @@ export class PixelAnimator {
       ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 5, hy + 11, 4, mouthOpen ? 2 : 1)
     } else if (action === 'slacking') {
-      ctx.fillStyle = '#1a1a1a'
+      // Happy smile
+      ctx.fillStyle = '#cc7755'
       ctx.fillRect(hx + 5, hy + 11, 5, 1)
-      ctx.fillRect(hx + 4, hy + 11, 1, 1) // smile curve
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(hx + 4, hy + 11, 1, 1)
       ctx.fillRect(hx + 10, hy + 11, 1, 1)
-    } else if (ws.state === 'anxious' || ws.state === 'crazy' || ws.state === 'collapse') {
+    } else if (ws.state === 'idle' || ws.state === 'relaxed') {
+      // Gentle smile
+      ctx.fillStyle = '#cc7755'
+      ctx.fillRect(hx + 5, hy + 11, 4, 1)
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(hx + 4, hy + 11, 1, 1)
+      ctx.fillRect(hx + 9, hy + 11, 1, 1)
+    } else if (ws.state === 'anxious' || ws.state === 'crazy') {
+      // Stressed wavy mouth
       ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 5, hy + 11, 5, 1)
-      ctx.fillRect(hx + 6, hy + 10, 1, 1) // wavy stress mouth
+      ctx.fillRect(hx + 6, hy + 10, 1, 1)
+      ctx.fillRect(hx + 8, hy + 12, 1, 1)
+    } else if (ws.state === 'collapse') {
+      // Frown
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(hx + 5, hy + 12, 5, 1)
+      ctx.fillRect(hx + 4, hy + 11, 1, 1)
+      ctx.fillRect(hx + 10, hy + 11, 1, 1)
     } else {
+      // Normal neutral mouth
       ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 6, hy + 11, 3, 1)
     }
@@ -1823,16 +2079,8 @@ export class PixelAnimator {
     const { ctx } = this
 
     if (action === 'chatting') {
-      const bubbleY = hy - 6
-      ctx.fillStyle = 'rgba(255,255,255,0.9)'
-      ctx.fillRect(hx + 12, bubbleY, 12, 6)
-      ctx.fillStyle = '#333333'
-      const dotAnim = Math.floor(this.frameCount / 8) % 4
-      for (let i = 0; i < 3; i++) {
-        if (i <= dotAnim) {
-          ctx.fillRect(hx + 13 + i * 3, bubbleY + 2, 2, 2)
-        }
-      }
+      // Chat bubble (HTML rendered)
+      this.addCanvasBubble(hx + 18, hy - 6, '...', 'thought', '#666666', 30)
     }
 
     if (ws.state === 'anxious' && this.frameCount % 23 < 15) {
@@ -1863,7 +2111,7 @@ export class PixelAnimator {
     }
   }
 
-  // Fallback person (for edge cases without PersonState) - uses enhanced 22x30 proportions
+  // Fallback person (Stardew Valley style) - for edge cases without PersonState
   private drawPersonFallback(x: number, y: number, state: ProgrammerState, app: PersonAppearance) {
     const { ctx } = this
     let bodyOffY = 0
@@ -1876,6 +2124,10 @@ export class PixelAnimator {
 
     const hx = x + 3
     const hy = y + bodyOffY + breathOffset
+
+    // Shadow
+    ctx.fillStyle = 'rgba(60, 40, 20, 0.12)'
+    ctx.fillRect(hx + 2, hy + 28, 12, 2)
 
     // Hair (5px high)
     ctx.fillStyle = app.hairColor
@@ -1927,24 +2179,55 @@ export class PixelAnimator {
     ctx.fillRect(hx + 2, hy + 7, 1, 3)
     ctx.fillRect(hx + 13, hy + 7, 1, 3)
 
+    // Blush / Cheeks (subtle pink)
+    ctx.fillStyle = 'rgba(255, 130, 130, 0.25)'
+    ctx.fillRect(hx + 3, hy + 10, 2, 2)
+    ctx.fillRect(hx + 11, hy + 10, 2, 2)
+
     // Headphones
     if (app.accessory === 'headphones') {
-      ctx.fillStyle = '#333333'
+      ctx.fillStyle = '#444444'
       ctx.fillRect(hx + 1, hy + 6, 2, 4)
       ctx.fillRect(hx + 13, hy + 6, 2, 4)
-      ctx.fillStyle = '#555555'
+      ctx.fillStyle = '#666666'
       ctx.fillRect(hx + 2, hy + 3, 12, 2)
     }
 
-    // Eyes (with blinking)
-    ctx.fillStyle = '#1a1a1a'
-    const blink = this.frameCount % 60 > 57
+    // Eyebrows (expressive based on state)
+    ctx.fillStyle = this.darkenColor(app.hairColor, 0.6)
+    if (state === 'anxious' || state === 'crazy') {
+      // Furrowed brows
+      ctx.fillRect(hx + 4, hy + 7, 3, 1)
+      ctx.fillRect(hx + 5, hy + 6, 2, 1)
+      ctx.fillRect(hx + 9, hy + 7, 3, 1)
+      ctx.fillRect(hx + 9, hy + 6, 2, 1)
+    } else if (state === 'collapse') {
+      // Drooping brows
+      ctx.fillRect(hx + 4, hy + 7, 3, 1)
+      ctx.fillRect(hx + 4, hy + 6, 1, 1)
+      ctx.fillRect(hx + 9, hy + 7, 3, 1)
+      ctx.fillRect(hx + 11, hy + 6, 1, 1)
+    } else {
+      // Normal brows
+      ctx.fillRect(hx + 4, hy + 6, 3, 1)
+      ctx.fillRect(hx + 9, hy + 6, 3, 1)
+    }
+
+    // Eyes (Stardew Valley style with blinking)
+    const blink = this.frameCount % 180 < 5
     if (blink) {
+      ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 4, hy + 8, 3, 1)
       ctx.fillRect(hx + 9, hy + 8, 3, 1)
     } else {
+      // Eye whites
+      ctx.fillStyle = '#ffffff'
       ctx.fillRect(hx + 4, hy + 7, 3, 3)
       ctx.fillRect(hx + 9, hy + 7, 3, 3)
+      // Pupils
+      ctx.fillStyle = '#2a2a2a'
+      ctx.fillRect(hx + 5, hy + 8, 2, 2)
+      ctx.fillRect(hx + 10, hy + 8, 2, 2)
       // Pupil highlight
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(hx + 5, hy + 7, 1, 1)
@@ -1959,11 +2242,28 @@ export class PixelAnimator {
       ctx.fillRect(hx + 7, hy + 8, 2, 1)
     }
 
-    // Mouth
-    ctx.fillStyle = '#1a1a1a'
-    if (state === 'anxious' || state === 'crazy') {
+    // Mouth (state-dependent, more expressive)
+    if (state === 'idle' || state === 'relaxed') {
+      // Gentle smile
+      ctx.fillStyle = '#cc7755'
+      ctx.fillRect(hx + 5, hy + 11, 4, 1)
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(hx + 4, hy + 11, 1, 1)
+      ctx.fillRect(hx + 9, hy + 11, 1, 1)
+    } else if (state === 'anxious' || state === 'crazy') {
+      // Stressed wavy mouth
+      ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 5, hy + 11, 5, 1)
+      ctx.fillRect(hx + 6, hy + 10, 1, 1)
+      ctx.fillRect(hx + 8, hy + 12, 1, 1)
+    } else if (state === 'collapse') {
+      // Frown
+      ctx.fillStyle = '#1a1a1a'
+      ctx.fillRect(hx + 5, hy + 12, 5, 1)
+      ctx.fillRect(hx + 4, hy + 11, 1, 1)
+      ctx.fillRect(hx + 10, hy + 11, 1, 1)
     } else {
+      ctx.fillStyle = '#1a1a1a'
       ctx.fillRect(hx + 6, hy + 11, 3, 1)
     }
 
@@ -1975,6 +2275,13 @@ export class PixelAnimator {
     ctx.fillStyle = app.shirtColor
     ctx.fillRect(hx + 1, hy + 14, 14, 3)
     ctx.fillRect(hx + 2, hy + 17, 12, 5)
+    // Collar detail
+    ctx.fillStyle = app.skinTone
+    ctx.fillRect(hx + 6, hy + 14, 4, 1)
+    // Shirt shadow at bottom
+    const shirtDarkFB = this.darkenColor(app.shirtColor, 0.75)
+    ctx.fillStyle = shirtDarkFB
+    ctx.fillRect(hx + 2, hy + 20, 12, 2)
 
     // Arms
     ctx.fillStyle = app.shirtColor
@@ -1987,13 +2294,25 @@ export class PixelAnimator {
     // Pants
     ctx.fillStyle = app.pantsColor
     ctx.fillRect(hx + 3, hy + 22, 10, 4)
+    // Belt
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(hx + 4, hy + 22, 8, 1)
+    // Belt buckle
+    ctx.fillStyle = '#888888'
+    ctx.fillRect(hx + 7, hy + 22, 2, 1)
 
     // Shoes
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(hx + 3, hy + 26, 4, 3)
     ctx.fillRect(hx + 9, hy + 26, 4, 3)
+    // Shoe sole
+    ctx.fillStyle = '#333333'
+    ctx.fillRect(hx + 3, hy + 28, 4, 1)
+    ctx.fillRect(hx + 9, hy + 28, 4, 1)
+    // Shoe highlight
+    ctx.fillStyle = '#3a3a3a'
+    ctx.fillRect(hx + 3, hy + 26, 3, 1)
+    ctx.fillRect(hx + 9, hy + 26, 3, 1)
   }
 
   // ====== Public: Label Position for HTML overlay ======
@@ -2158,7 +2477,7 @@ export class PixelAnimator {
   private catNewTarget() {
     this.cat.state = 'walking'
     this.cat.targetX = 40 + Math.random() * (CANVAS_W - 120)
-    this.cat.y = FLOOR_TOP + 20 + Math.random() * 20
+    this.cat.y = this.floorTop + 20 + Math.random() * 20
     this.cat.stateTimer = 0
     this.cat.yarnBallX = this.cat.x + (Math.random() > 0.5 ? 30 : -30)
     this.cat.yarnBallY = this.cat.y + 5
@@ -2211,14 +2530,21 @@ export class PixelAnimator {
 
   private drawCatBody(x: number, y: number, state: string, frame: number) {
     const { ctx } = this
-    ctx.fillStyle = '#FF8C00'
+    // Stardew Valley style orange tabby cat
+    ctx.fillStyle = '#f0a030'
     if (state === 'walking' || state === 'playing') {
       ctx.fillRect(x + 2, y, 10, 6)
       ctx.fillRect(x + 10, y - 2, 5, 5)
-      ctx.fillStyle = '#FF6600'
+      // Ears
+      ctx.fillStyle = '#e09020'
       ctx.fillRect(x + 11, y - 3, 2, 1)
       ctx.fillRect(x + 14, y - 3, 2, 1)
-      ctx.fillStyle = '#CC7000'
+      // Tabby stripes
+      ctx.fillStyle = '#cc8020'
+      ctx.fillRect(x + 4, y + 1, 2, 3)
+      ctx.fillRect(x + 7, y + 1, 2, 3)
+      // Legs (animated)
+      ctx.fillStyle = '#e09020'
       if (frame === 0) {
         ctx.fillRect(x + 3, y + 6, 2, 3)
         ctx.fillRect(x + 9, y + 6, 2, 3)
@@ -2226,37 +2552,40 @@ export class PixelAnimator {
         ctx.fillRect(x + 5, y + 6, 2, 3)
         ctx.fillRect(x + 7, y + 6, 2, 3)
       }
-      ctx.fillStyle = '#FF8C00'
+      // Tail
+      ctx.fillStyle = '#f0a030'
       ctx.fillRect(x, y - 1, 2, 3)
       ctx.fillRect(x - 1, y - 2, 2, 2)
     } else if (state === 'sitting') {
       ctx.fillRect(x + 2, y, 8, 7)
       ctx.fillRect(x + 8, y - 2, 5, 5)
-      ctx.fillStyle = '#FF6600'
+      ctx.fillStyle = '#e09020'
       ctx.fillRect(x + 9, y - 3, 1, 1)
       ctx.fillRect(x + 12, y - 3, 1, 1)
-      ctx.fillStyle = '#FF8C00'
+      // Tail curled
+      ctx.fillStyle = '#f0a030'
       ctx.fillRect(x, y + 3, 3, 2)
     } else if (state === 'stretching') {
       ctx.fillRect(x + 2, y - 1, 10, 5)
       ctx.fillRect(x + 10, y - 3, 5, 4)
-      ctx.fillStyle = '#FF6600'
+      ctx.fillStyle = '#e09020'
       ctx.fillRect(x + 11, y - 4, 2, 1)
       ctx.fillRect(x + 14, y - 4, 2, 1)
-      ctx.fillStyle = '#CC7000'
+      ctx.fillStyle = '#cc8020'
       ctx.fillRect(x + 2, y + 4, 2, 4)
       ctx.fillRect(x + 10, y + 4, 2, 3)
-      ctx.fillStyle = '#FF8C00'
+      ctx.fillStyle = '#f0a030'
       ctx.fillRect(x - 1, y - 3, 2, 3)
       ctx.fillRect(x - 2, y - 4, 2, 2)
     } else {
-      // sleeping
+      // sleeping (curled up)
       ctx.fillRect(x + 2, y + 2, 10, 5)
       ctx.fillRect(x + 3, y + 1, 8, 2)
-      ctx.fillStyle = '#CC7000'
+      ctx.fillStyle = '#cc8020'
       ctx.fillRect(x + 8, y + 4, 4, 2)
+      // Z z z
       if (this.frameCount % 30 < 20) {
-        ctx.fillStyle = 'rgba(255,255,255,0.6)'
+        ctx.fillStyle = 'rgba(100,100,100,0.5)'
         ctx.font = '7px monospace'
         ctx.fillText('z', x + 12, y - 1)
         if (this.frameCount % 30 < 13) ctx.fillText('z', x + 15, y - 4)
@@ -2281,10 +2610,10 @@ export class PixelAnimator {
         break
       case 'climbing': {
         const targetWs = this.workstations[b.targetMemberIndex]
-        const targetY = targetWs ? targetWs.y + 60 : WORK_BOTTOM - 30
+        const targetY = targetWs ? targetWs.y + 60 : this.workBottom - 30
         if (b.frame <= 25) {
           const progress = b.frame / 25
-          b.y = FLOOR_TOP + 30 - (FLOOR_TOP + 30 - targetY) * progress
+          b.y = this.floorTop + 30 - (this.floorTop + 30 - targetY) * progress
         } else {
           b.y = targetY
           b.phase = 'whipping'
@@ -2326,13 +2655,13 @@ export class PixelAnimator {
       case 'leaving': {
         if (b.speechBubbleTimer > 0) b.speechBubbleTimer--
         if (b.frame <= 18) {
-          const corridorY = FLOOR_TOP + 30
+          const corridorY = this.floorTop + 30
           if (b.frame === 1) (b as any)._leaveStartY = b.y
           const leaveStartY = (b as any)._leaveStartY || b.y
           const progress = b.frame / 18
           b.y = leaveStartY + (corridorY - leaveStartY) * progress
         } else {
-          b.y = FLOOR_TOP + 30
+          b.y = this.floorTop + 30
           b.x += 1.0
           if (b.x > CANVAS_W + 20) b.active = false
         }
@@ -2418,7 +2747,7 @@ export class PixelAnimator {
 
     if (phase === 'whipping') this.drawWhip(x, y, whipFrame)
     if (phase === 'leaving' && this.boss.speechBubbleTimer > 0) {
-      this.drawSpeechBubble(x, headTop - 5, this.boss.speechText)
+      this.addCanvasBubble(x, headTop - 5, this.boss.speechText, 'shout', '#ff0000')
     }
   }
 
@@ -2449,26 +2778,6 @@ export class PixelAnimator {
       ctx.fillRect(sparkX + 2, sparkY - 1, 3, 1)
       ctx.fillRect(sparkX + 3, sparkY - 2, 1, 3)
     }
-  }
-
-  private drawSpeechBubble(x: number, y: number, text: string) {
-    const { ctx } = this
-    const textWidth = text.length * 7
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(x - textWidth / 2 - 4, y - 14, textWidth + 8, 12)
-    ctx.fillStyle = '#333333'
-    ctx.fillRect(x - textWidth / 2 - 5, y - 14, 1, 12)
-    ctx.fillRect(x + textWidth / 2 + 4, y - 14, 1, 12)
-    ctx.fillRect(x - textWidth / 2 - 4, y - 15, textWidth + 8, 1)
-    ctx.fillRect(x - textWidth / 2 - 4, y - 2, textWidth + 8, 1)
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(x - 1, y - 2, 3, 2)
-    ctx.fillRect(x, y, 1, 2)
-    ctx.fillStyle = '#cc0000'
-    ctx.font = 'bold 8px sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText(text, x, y - 5)
-    ctx.textAlign = 'left'
   }
 
   // ====== Boss Target Reaction ======
@@ -2512,7 +2821,7 @@ export class PixelAnimator {
         vy: 0.01 + Math.random() * 0.02,
         life: 100 + Math.floor(Math.random() * 75),
         maxLife: 175,
-        color: 'rgba(255,255,200,0.3)',
+        color: 'rgba(255,240,180,0.4)',
         size: 1,
         type: 'dust',
       })
@@ -2582,16 +2891,18 @@ export class PixelAnimator {
     const env = this.environment
 
     if (env.lightFlicker > 0) {
-      ctx.fillStyle = 'rgba(0,0,0,0.12)'
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      ctx.fillStyle = 'rgba(60,40,20,0.08)'
+      ctx.fillRect(0, 0, CANVAS_W, this.canvasH)
     }
 
     if (env.totalBugs <= 3 && this.workstations.length > 0) {
-      ctx.fillStyle = 'rgba(0,255,100,0.015)'
-      ctx.fillRect(0, WORK_TOP, CANVAS_W, WORK_BOTTOM - WORK_TOP)
+      // Warm sunlight glow when peaceful
+      ctx.fillStyle = 'rgba(255,248,200,0.03)'
+      ctx.fillRect(0, WORK_TOP, CANVAS_W, this.workBottom - WORK_TOP)
     } else if (env.totalBugs > 10) {
-      ctx.fillStyle = 'rgba(255,50,0,0.02)'
-      ctx.fillRect(0, WORK_TOP, CANVAS_W, WORK_BOTTOM - WORK_TOP)
+      // Slight warm stress tint
+      ctx.fillStyle = 'rgba(200,100,50,0.02)'
+      ctx.fillRect(0, WORK_TOP, CANVAS_W, this.workBottom - WORK_TOP)
     }
   }
 
@@ -2670,7 +2981,7 @@ export class PixelAnimator {
     if (this.flashAlpha > 0) {
       this.ctx.globalAlpha = this.flashAlpha
       this.ctx.fillStyle = '#ffffff'
-      this.ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      this.ctx.fillRect(0, 0, CANVAS_W, this.canvasH)
       this.ctx.globalAlpha = 1
       this.flashAlpha -= 0.03
       if (this.flashAlpha < 0) this.flashAlpha = 0
@@ -2873,8 +3184,8 @@ export class PixelAnimator {
       case 'speech': {
         // Draw person with speech bubble
         this.drawStandingPerson(state.x, state.y, appearance, 'satisfied')
-        // Speech bubble
-        this.drawSpeechBubble(state.x, state.y - 30, state.speechText)
+        // Speech bubble (HTML rendered)
+        this.addCanvasBubble(state.x, state.y - 30, state.speechText, 'shout', '#ff4444')
         // Target cowering
         this.drawCoweringTarget(targetWs, state.frame)
         // Bystander reactions
@@ -3138,7 +3449,7 @@ export class PixelAnimator {
     if (this.frameCount % 2 !== 0) return
 
     // === Actual render ===
-    this.ctx.clearRect(0, 0, CANVAS_W, CANVAS_H)
+    this.ctx.clearRect(0, 0, CANVAS_W, this.canvasH)
 
     // Background: use cached offscreen canvas
     if (this.bgDirty) {
@@ -3240,6 +3551,9 @@ export class PixelAnimator {
 
     // Flash effect
     this.drawFlash()
+
+    // Update HTML speech bubbles (decrement duration, remove expired)
+    this.updateCanvasBubbles()
   }
 
   // ====== Sprite Effect Rendering ======
@@ -3379,19 +3693,13 @@ export class PixelAnimator {
     // Phase 0: Delivery guy walks in from right
     if (phase === 0) {
       const enterX = CANVAS_W + 20 - (f / 60) * (CANVAS_W - 600)
-      this.drawDeliveryGuy(enterX, FLOOR_TOP + 15)
+      this.drawDeliveryGuy(enterX, this.floorTop + 15)
     }
     // Phase 1: Shouts "外卖到了！", everyone stands up excited
     else if (phase === 1) {
-      this.drawDeliveryGuy(620, FLOOR_TOP + 15)
-      // Speech bubble
-      ctx.fillStyle = 'rgba(255,255,255,0.95)'
-      ctx.fillRect(580, FLOOR_TOP - 5, 60, 18)
-      ctx.fillStyle = '#ff6600'
-      ctx.font = 'bold 9px monospace'
-      ctx.textAlign = 'center'
-      ctx.fillText('外卖到了！', 610, FLOOR_TOP + 8)
-      ctx.textAlign = 'left'
+      this.drawDeliveryGuy(620, this.floorTop + 15)
+      // Speech bubble (HTML rendered)
+      this.addCanvasBubble(610, this.floorTop - 5, '外卖到了！', 'shout', '#ff6600')
       // Exclamation above members
       for (let i = 0; i < this.workstations.length; i++) {
         const ws = this.workstations[i]
@@ -3402,13 +3710,13 @@ export class PixelAnimator {
     }
     // Phase 2: Everyone walks toward right side
     else if (phase === 2) {
-      this.drawDeliveryGuy(620, FLOOR_TOP + 15)
+      this.drawDeliveryGuy(620, this.floorTop + 15)
       const progress = (f - 120) / 180
       for (let i = 0; i < this.workstations.length; i++) {
         const ws = this.workstations[i]
         const targetX = 550 + (i % 3) * 25
         const currentX = ws.x + 24 + (targetX - ws.x - 24) * Math.min(1, progress * (1 + i * 0.1))
-        const currentY = ws.y + 40 + (FLOOR_TOP + 20 - ws.y - 40) * Math.min(1, progress)
+        const currentY = ws.y + 40 + (this.floorTop + 20 - ws.y - 40) * Math.min(1, progress)
         const bounce = Math.sin((f + i * 10) * 0.2) * 2
         this.drawStandingPerson(currentX, currentY + bounce, ws.appearance, 'normal')
       }
@@ -3420,7 +3728,7 @@ export class PixelAnimator {
         const ws = this.workstations[i]
         const startX = 550 + (i % 3) * 25
         const currentX = startX + (ws.x + 24 - startX) * Math.min(1, progress)
-        const currentY = FLOOR_TOP + 20 + (ws.y + 40 - FLOOR_TOP - 20) * Math.min(1, progress)
+        const currentY = this.floorTop + 20 + (ws.y + 40 - this.floorTop - 20) * Math.min(1, progress)
         this.drawStandingPerson(currentX, currentY, ws.appearance, 'satisfied')
         // Food box in hand
         ctx.fillStyle = '#ff8844'
@@ -3428,7 +3736,7 @@ export class PixelAnimator {
       }
       // Delivery guy leaving
       const leaveX = 620 + progress * 120
-      this.drawDeliveryGuy(leaveX, FLOOR_TOP + 15)
+      this.drawDeliveryGuy(leaveX, this.floorTop + 15)
     }
     // Phase 4: Eating at desk
     else if (phase === 4) {
@@ -3481,12 +3789,12 @@ export class PixelAnimator {
       const flickerOn = f < 7 || (f > 10 && f < 14)
       if (!flickerOn) {
         ctx.fillStyle = `rgba(0,0,0,${Math.min(1, (f - 5) / 15)})`
-        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+        ctx.fillRect(0, 0, CANVAS_W, this.canvasH)
       }
     } else if (phase === 1) {
       // Full darkness with emergency light
       ctx.fillStyle = 'rgba(0,0,0,0.92)'
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      ctx.fillRect(0, 0, CANVAS_W, this.canvasH)
       // Emergency light (green blink)
       const blink = (f % 30) < 15
       if (blink) {
@@ -3499,7 +3807,7 @@ export class PixelAnimator {
     } else if (phase === 2) {
       // Darkness + phone screens light up
       ctx.fillStyle = 'rgba(0,0,0,0.85)'
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      ctx.fillRect(0, 0, CANVAS_W, this.canvasH)
       // Phone screens at each workstation
       for (let i = 0; i < this.workstations.length; i++) {
         const ws = this.workstations[i]
@@ -3517,7 +3825,7 @@ export class PixelAnimator {
       const progress = (f - 200) / 60
       const alpha = Math.max(0, 0.85 - progress * 0.85)
       ctx.fillStyle = `rgba(0,0,0,${alpha})`
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      ctx.fillRect(0, 0, CANVAS_W, this.canvasH)
     } else if (phase === 4) {
       // Everyone cheers
       for (let i = 0; i < this.workstations.length; i++) {
@@ -3526,15 +3834,9 @@ export class PixelAnimator {
         ctx.fillStyle = ws.appearance.skinTone
         ctx.fillRect(ws.x + 18, ws.y + 20, 3, 6)
         ctx.fillRect(ws.x + 28, ws.y + 20, 3, 6)
-        // "耶！" bubble
+        // "耶！" bubble (HTML rendered)
         if (i % 2 === 0) {
-          ctx.fillStyle = 'rgba(255,255,255,0.9)'
-          ctx.fillRect(ws.x + 14, ws.y - 8, 24, 12)
-          ctx.fillStyle = '#ff6600'
-          ctx.font = '8px monospace'
-          ctx.textAlign = 'center'
-          ctx.fillText('耶！', ws.x + 26, ws.y)
-          ctx.textAlign = 'left'
+          this.addCanvasBubble(ws.x + 26, ws.y - 8, '耶！', 'shout', '#ff6600')
         }
       }
     }
@@ -3548,10 +3850,10 @@ export class PixelAnimator {
     if (phase === 0) {
       // Boss + client walk in from left
       const enterX = -30 + (f / 60) * 100
-      this.drawBossVisitPair(enterX, FLOOR_TOP + 15)
+      this.drawBossVisitPair(enterX, this.floorTop + 15)
     } else if (phase === 1) {
       // Everyone sits up straight instantly
-      this.drawBossVisitPair(70, FLOOR_TOP + 15)
+      this.drawBossVisitPair(70, this.floorTop + 15)
       // "!" above everyone
       for (const ws of this.workstations) {
         ctx.fillStyle = '#ff4444'
@@ -3562,7 +3864,7 @@ export class PixelAnimator {
       // Boss walks through, everyone typing fast
       const walkProgress = (f - 90) / 150
       const bossX = 70 + walkProgress * (CANVAS_W - 140)
-      this.drawBossVisitPair(bossX, FLOOR_TOP + 15)
+      this.drawBossVisitPair(bossX, this.floorTop + 15)
       // Typing sparks on screens
       for (const ws of this.workstations) {
         if (this.frameCount % 4 < 2) {
@@ -3575,7 +3877,7 @@ export class PixelAnimator {
       // Boss and client leave from right
       const leaveProgress = (f - 240) / 60
       const bossX = CANVAS_W - 70 + leaveProgress * 100
-      this.drawBossVisitPair(bossX, FLOOR_TOP + 15)
+      this.drawBossVisitPair(bossX, this.floorTop + 15)
     } else if (phase === 4) {
       // Everyone relaxes: slump + wipe sweat
       for (let i = 0; i < this.workstations.length; i++) {
@@ -3583,15 +3885,9 @@ export class PixelAnimator {
         // Sweat drops
         ctx.fillStyle = '#66ccff'
         ctx.fillRect(ws.x + 30, ws.y + 32, 2, 3)
-        // Relief sigh
+        // Relief sigh (HTML rendered)
         if (i % 3 === 0) {
-          ctx.fillStyle = 'rgba(255,255,255,0.8)'
-          ctx.fillRect(ws.x + 14, ws.y - 5, 24, 12)
-          ctx.fillStyle = '#666666'
-          ctx.font = '7px monospace'
-          ctx.textAlign = 'center'
-          ctx.fillText('终于走了...', ws.x + 26, ws.y + 3)
-          ctx.textAlign = 'left'
+          this.addCanvasBubble(ws.x + 26, ws.y - 5, '终于走了...', 'thought', '#aaaaaa')
         }
         // Fist (secret gesture)
         if (i === this.workstations.length - 1 && (f % 20) < 10) {
@@ -3646,7 +3942,7 @@ export class PixelAnimator {
       // Cat jumps onto desk
       const jumpProgress = f / 40
       const catX = ws.x + 40
-      const catY = FLOOR_TOP + 30 - jumpProgress * (FLOOR_TOP + 30 - deskY + 10)
+      const catY = this.floorTop + 30 - jumpProgress * (this.floorTop + 30 - deskY + 10)
       this.drawEventCat(catX, catY)
     } else if (phase === 1) {
       // Cat paws at coffee cup, cup tilts
@@ -3676,14 +3972,8 @@ export class PixelAnimator {
           ctx.fillRect(ws.x + 40 + d * 5, dropY, 2, 3)
         }
       }
-      // Person reaction: "啊！"
-      ctx.fillStyle = 'rgba(255,255,255,0.9)'
-      ctx.fillRect(ws.x + 10, ws.y + 10, 20, 14)
-      ctx.fillStyle = '#ff0000'
-      ctx.font = 'bold 10px monospace'
-      ctx.textAlign = 'center'
-      ctx.fillText('啊！', ws.x + 20, ws.y + 21)
-      ctx.textAlign = 'left'
+      // Person reaction: "啊！" (HTML rendered)
+      this.addCanvasBubble(ws.x + 20, ws.y + 10, '啊！', 'shout', '#ff0000')
     } else if (phase === 3) {
       // Person wiping desk, cat licking paw
       // Cat sitting
@@ -3700,19 +3990,19 @@ export class PixelAnimator {
 
   private drawEventCat(x: number, y: number): void {
     const { ctx } = this
-    // Simple pixel cat
-    ctx.fillStyle = '#ff8c00'
+    // Stardew Valley style pixel cat
+    ctx.fillStyle = '#f0a030'
     ctx.fillRect(x - 4, y - 3, 8, 6) // body
     ctx.fillRect(x - 6, y - 6, 5, 5) // head
     // Ears
     ctx.fillRect(x - 7, y - 8, 2, 3)
     ctx.fillRect(x - 3, y - 8, 2, 3)
     // Eyes
-    ctx.fillStyle = '#000000'
+    ctx.fillStyle = '#2a2a2a'
     ctx.fillRect(x - 6, y - 4, 1, 1)
     ctx.fillRect(x - 3, y - 4, 1, 1)
     // Tail
-    ctx.fillStyle = '#ff8c00'
+    ctx.fillStyle = '#e09020'
     ctx.fillRect(x + 4, y - 4, 2, 2)
     ctx.fillRect(x + 5, y - 6, 2, 3)
   }
@@ -3723,26 +4013,26 @@ export class PixelAnimator {
     const hour = now.getHours()
     const minute = now.getMinutes()
 
-    // Reset trigger flag after window passes
-    if (minute >= 10 && this.lastCheckedMinute < 10) {
-      this.offWorkTriggeredThisHour = false
-    }
-    this.lastCheckedMinute = minute
-
     // 12:00-12:05 or 18:00-18:05 trigger window
-    const isLunchTime = hour === 12 && minute < 5
-    const isOffTime = hour === 18 && minute < 5
+    const isLunchTime = hour === 12 && minute >= 0 && minute < 5
+    const isOffTime = hour === 18 && minute >= 0 && minute < 5
 
     if ((isLunchTime || isOffTime) && !this.offWork.active && !this.offWorkTriggeredThisHour) {
       this.triggerOffWork()
       this.offWorkTriggeredThisHour = true
     }
 
-    // 12:30 or 18:30 colleagues return
-    const isReturnTime = (hour === 12 && minute >= 30) || (hour === 18 && minute >= 30)
-    if (isReturnTime && this.offWork.active && this.offWork.phase === 'empty') {
+    // 13:30 lunch return or 18:30 off-work return
+    const isLunchReturn = hour === 13 && minute >= 30
+    const isOffReturn = hour === 18 && minute >= 30
+    if ((isLunchReturn || isOffReturn) && this.offWork.active && this.offWork.phase === 'empty') {
       this.offWork.phase = 'returning'
       this.offWork.frame = 0
+    }
+
+    // Reset trigger flag well after the return window
+    if ((hour === 13 && minute >= 35) || (hour === 19 && minute >= 0)) {
+      this.offWorkTriggeredThisHour = false
     }
   }
 
@@ -3810,14 +4100,28 @@ export class PixelAnimator {
           }
         }
       }
-      if (allBack) {
+      // Safety: max 300 frames (~5s) for returning, force complete
+      if (allBack || this.offWork.frame > 300) {
         this.offWork.active = false
+        this.offWork.phase = 'leaving'
+        this.offWork.frame = 0
+        // Force reset all offsets
+        for (const offset of this.offWork.memberOffsets) {
+          offset.x = 0
+          offset.gone = false
+        }
       }
     } else if (this.offWork.phase === 'empty') {
       this.offWork.lonelyTimer++
       // Change lonely text every 150 frames (~5 seconds)
       if (this.offWork.lonelyTimer % 150 === 0) {
         this.offWork.lonelyTextIndex = (this.offWork.lonelyTextIndex + 1) % LONELY_TEXTS.length
+      }
+      // Safety timeout: max ~90 minutes (324000 frames at 60fps), auto-end if stuck
+      if (this.offWork.frame > 324000) {
+        this.offWork.active = false
+        this.offWork.phase = 'leaving'
+        this.offWork.frame = 0
       }
     }
   }
@@ -3846,16 +4150,10 @@ export class PixelAnimator {
             // Backpack
             ctx.fillStyle = '#555555'
             ctx.fillRect(walkX - 7, walkY - 12, 5, 8)
-            // Wave bye
+            // Wave bye (HTML rendered)
             if (offset.x > 30 && offset.x < 80) {
-              ctx.fillStyle = 'rgba(255,255,255,0.85)'
-              ctx.fillRect(walkX - 15, walkY - 30, 36, 14)
-              ctx.fillStyle = '#666'
-              ctx.font = '8px monospace'
-              ctx.textAlign = 'center'
               const texts = ['拜拜~', '下班啦!', '辛苦了...']
-              ctx.fillText(texts[leaveIdx % texts.length], walkX + 3, walkY - 20)
-              ctx.textAlign = 'left'
+              this.addCanvasBubble(walkX + 3, walkY - 30, texts[leaveIdx % texts.length], 'speech', '#666666', 30)
             }
           } else if (offset.gone) {
             // Already gone - empty workstation
@@ -3892,7 +4190,7 @@ export class PixelAnimator {
         // Right
         ctx.fillRect(userWs.x + 65, userWs.y - 10, CANVAS_W - userWs.x - 65, 100)
         // Bottom
-        ctx.fillRect(0, userWs.y + 90, CANVAS_W, CANVAS_H - userWs.y - 90)
+        ctx.fillRect(0, userWs.y + 90, CANVAS_W, this.canvasH - userWs.y - 90)
 
         // Lonely user actions
         const actionCycle = this.offWork.lonelyTimer % 120
@@ -3903,17 +4201,10 @@ export class PixelAnimator {
           ctx.fillRect(userWs.x + 30, sighY, 3, 2)
         }
 
-        // Lonely text bubble
+        // Lonely text bubble (HTML rendered)
         if (this.offWork.lonelyTimer > 60 && (this.offWork.lonelyTimer % 150) < 80) {
           const text = LONELY_TEXTS[this.offWork.lonelyTextIndex]
-          const textW = text.length * 8 + 12
-          ctx.fillStyle = 'rgba(40,40,60,0.9)'
-          ctx.fillRect(userWs.x + 24 - textW / 2, userWs.y - 20, textW, 16)
-          ctx.fillStyle = '#aaaaff'
-          ctx.font = '8px monospace'
-          ctx.textAlign = 'center'
-          ctx.fillText(text, userWs.x + 24, userWs.y - 8)
-          ctx.textAlign = 'left'
+          this.addCanvasBubble(userWs.x + 24, userWs.y - 20, text, 'thought', '#aaaaff', 80)
         }
 
         // Cat comes to comfort (during empty phase)
@@ -3955,15 +4246,9 @@ export class PixelAnimator {
             // Carrying tea/snack
             ctx.fillStyle = '#88ddaa'
             ctx.fillRect(walkX + 5, walkY - 5, 4, 5)
-            // "你还在啊？！" bubble for first person back
+            // "你还在啊？！" bubble for first person back (HTML rendered)
             if (leaveIdx === 0 && offset.x < 60) {
-              ctx.fillStyle = 'rgba(255,255,255,0.9)'
-              ctx.fillRect(walkX - 20, walkY - 35, 56, 16)
-              ctx.fillStyle = '#333'
-              ctx.font = '8px monospace'
-              ctx.textAlign = 'center'
-              ctx.fillText('你还在啊？！', walkX + 8, walkY - 24)
-              ctx.textAlign = 'left'
+              this.addCanvasBubble(walkX + 8, walkY - 35, '你还在啊？！', 'speech', '#333333', 30)
             }
           } else {
             // Back at desk
@@ -4088,11 +4373,9 @@ export class PixelAnimator {
         const opacity = Math.max(0, 1 - fs.frame / 60)
         ctx.globalAlpha = opacity
         ctx.fillText('❤', targetWs.x + 24, heartY)
-        // If bugCount > 3 show "续命了..."
+        // If bugCount > 3 show "续命了..." (HTML rendered)
         if (targetWs.bugCount > 3 && fs.frame > 20 && fs.frame < 55) {
-          ctx.font = '8px monospace'
-          ctx.fillStyle = '#00ff88'
-          ctx.fillText('续命了...', targetWs.x + 24, targetWs.y + 5)
+          this.addCanvasBubble(targetWs.x + 24, targetWs.y + 5, '续命了...', 'thought', '#00ff88', 45)
         }
         ctx.globalAlpha = 1
         ctx.textAlign = 'left'
@@ -4206,13 +4489,9 @@ export class PixelAnimator {
       ctx.globalAlpha = Math.max(0, 1 - ci.frame / 40)
       ctx.fillStyle = '#ff6b6b'
       ctx.fillText('❤', catX, heartY)
-      // "喵呜" bubble
+      // "喵呜" bubble (HTML rendered)
       if (ci.frame < 25) {
-        ctx.fillStyle = 'rgba(255,255,255,0.9)'
-        ctx.fillRect(catX + 6, catY - 14, 24, 10)
-        ctx.font = '7px monospace'
-        ctx.fillStyle = '#333'
-        ctx.fillText('喵呜~', catX + 18, catY - 7)
+        this.addCanvasBubble(catX + 18, catY - 14, '喵呜~', 'speech', '#333333', 25)
       }
       ctx.globalAlpha = 1
       ctx.textAlign = 'left'
@@ -4253,7 +4532,7 @@ export class PixelAnimator {
 
     // Golden background bar
     const centerX = CANVAS_W / 2
-    const centerY = CANVAS_H / 2 - 30
+    const centerY = this.canvasH / 2 - 30
     ctx.fillStyle = 'rgba(0,0,0,0.8)'
     ctx.fillRect(centerX - 80, centerY - 15, 160, 30)
     ctx.strokeStyle = '#ffd700'

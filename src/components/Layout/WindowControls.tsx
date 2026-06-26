@@ -34,12 +34,12 @@ export default function WindowControls() {
 
   return (
     <div
-      className="flex items-center gap-0.5"
+      className="flex items-center gap-1.5"
       style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
     >
       <button
         onClick={handleTogglePin}
-        className={`w-[14px] h-[14px] flex items-center justify-center rounded-full
+        className={`w-5 h-5 flex items-center justify-center rounded-full
           transition-colors duration-150 border border-transparent
           ${isPinned
             ? 'bg-accent/30 text-accent hover:bg-accent/50 border-accent/50'
@@ -47,27 +47,27 @@ export default function WindowControls() {
           }`}
         title={isPinned ? '取消置顶' : '置顶'}
       >
-        {isPinned ? <Pin size={8} /> : <PinOff size={8} />}
+        {isPinned ? <Pin size={10} /> : <PinOff size={10} />}
       </button>
 
       <button
         onClick={handleMinimize}
-        className="w-[14px] h-[14px] flex items-center justify-center rounded-full
+        className="w-5 h-5 flex items-center justify-center rounded-full
           bg-white/10 text-textSecondary hover:bg-yellow-400/80 hover:text-black
           transition-colors duration-150"
         title="最小化到托盘"
       >
-        <Minus size={8} />
+        <Minus size={10} />
       </button>
 
       <button
         onClick={handleClose}
-        className="w-[14px] h-[14px] flex items-center justify-center rounded-full
+        className="w-5 h-5 flex items-center justify-center rounded-full
           bg-white/10 text-textSecondary hover:bg-red-500/80 hover:text-white
           transition-colors duration-150"
         title="关闭"
       >
-        <X size={8} />
+        <X size={10} />
       </button>
     </div>
   )
