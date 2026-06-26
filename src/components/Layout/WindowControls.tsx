@@ -39,35 +39,35 @@ export default function WindowControls() {
     >
       <button
         onClick={handleTogglePin}
-        className={`w-6 h-6 flex items-center justify-center rounded
-          transition-colors duration-150
+        className={`w-[14px] h-[14px] flex items-center justify-center rounded-full
+          transition-colors duration-150 border border-transparent
           ${isPinned
-            ? 'text-accent hover:bg-accent/20'
-            : 'text-textSecondary hover:text-textPrimary hover:bg-white/10'
+            ? 'bg-accent/30 text-accent hover:bg-accent/50 border-accent/50'
+            : 'bg-white/10 text-textSecondary hover:text-textPrimary hover:bg-white/20'
           }`}
         title={isPinned ? '取消置顶' : '置顶'}
       >
-        {isPinned ? <Pin size={12} /> : <PinOff size={12} />}
+        {isPinned ? <Pin size={8} /> : <PinOff size={8} />}
       </button>
 
       <button
         onClick={handleMinimize}
-        className="w-6 h-6 flex items-center justify-center rounded
-          text-textSecondary hover:text-textPrimary hover:bg-white/10
+        className="w-[14px] h-[14px] flex items-center justify-center rounded-full
+          bg-white/10 text-textSecondary hover:bg-yellow-400/80 hover:text-black
           transition-colors duration-150"
         title="最小化到托盘"
       >
-        <Minus size={12} />
+        <Minus size={8} />
       </button>
 
       <button
         onClick={handleClose}
-        className="w-6 h-6 flex items-center justify-center rounded
-          text-textSecondary hover:text-red-400 hover:bg-red-400/10
+        className="w-[14px] h-[14px] flex items-center justify-center rounded-full
+          bg-white/10 text-textSecondary hover:bg-red-500/80 hover:text-white
           transition-colors duration-150"
         title="关闭"
       >
-        <X size={12} />
+        <X size={8} />
       </button>
     </div>
   )

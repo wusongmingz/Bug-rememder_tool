@@ -31,3 +31,10 @@ npm-debug.log*
 .cache/
 .parcel-cache/
 .vite/
+
+# Electron Builder output
+release/
+*.exe
+*.blockmap
+*.yml
+!electron/**

@@ -40,4 +40,4 @@ export interface Settings {
   selectedProductIds?: number[]  // 用户勾选的产品ID列表，空/undefined 表示全选
 }
 
-export type ViewType = 'bugs' | 'todos' | 'stats'
+export type ViewType = 'home' | 'todos' | 'bugs' | 'progress' | 'team' | 'stats' | 'settings'

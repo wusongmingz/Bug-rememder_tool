@@ -677,6 +677,68 @@ class ZentaoAPI {
     console.log('[ZentaoAPI] 全部Bug总数:', uniqueBugs.length);
     return { bugs: uniqueBugs, usersMap: globalUsersMap };
   }
+
+  /**
+   * 转指派Bug给其他人
+   * @param {number} bugId - Bug ID
+   * @param {string} assignedTo - 目标人员账号名（account，非真名）
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  async assignBug(bugId, assignedTo) {
+    // 确保已登录
+    if (!this.token && !this.sessionId) {
+      await this.login();
+    }
+
+    try {
+      // 禅道20.8 REST API v1: PUT /api.php/v1/bugs/{id}
+      const url = `${this.origin}${this.webRoot}/api.php/v1/bugs/${bugId}`;
+      console.log(`[ZentaoAPI] 转指派Bug #${bugId} 给 ${assignedTo}`);
+
+      const res = await this.request(url, {
+        method: 'PUT',
+        body: { assignedTo },
+      });
+
+      if (res.statusCode === 200 || res.statusCode === 201) {
+        console.log(`[ZentaoAPI] Bug #${bugId} 已转指派给 ${assignedTo}`);
+        return { success: true, data: res.data };
+      }
+
+      // Token过期重试
+      if (res.statusCode === 401 && !this._assignRetried) {
+        this._assignRetried = true;
+        console.log('[ZentaoAPI] Token过期, 重新登录后重试转指派...');
+        this.token = null;
+        await this.login();
+        const result = await this.assignBug(bugId, assignedTo);
+        this._assignRetried = false;
+        return result;
+      }
+
+      const errorMsg = res.data?.error || res.data?.message || `HTTP ${res.statusCode}`;
+      console.error(`[ZentaoAPI] 转指派失败: ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    } catch (error) {
+      console.error(`[ZentaoAPI] 转指派异常:`, error.message);
+
+      // 网络异常时也尝试重新登录重试一次
+      if (!this._assignRetried) {
+        this._assignRetried = true;
+        try {
+          await this.login();
+          const result = await this.assignBug(bugId, assignedTo);
+          this._assignRetried = false;
+          return result;
+        } catch (retryError) {
+          this._assignRetried = false;
+          return { success: false, error: retryError.message };
+        }
+      }
+
+      return { success: false, error: error.message };
+    }
+  }
 }
 
 module.exports = ZentaoAPI;

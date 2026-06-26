@@ -1,16 +1,24 @@
 import { useState } from 'react'
 import { useBugStore } from '@/stores/bugStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { useAchievementStore } from '@/stores/achievementStore'
 import { useZentao } from '@/hooks/useZentao'
 import StatusDot from '@/components/Shared/StatusDot'
+import WindowControls from '@/components/Layout/WindowControls'
 import PixelScene from '../PixelScene/PixelScene'
+import BugListPanel from './BugListPanel'
+import BugDetailPanel from './BugDetailPanel'
 
 export default function BugDashboard() {
   const { connectionStatus, bugs, teamMembers } = useBugStore()
   const { selectedMembers, setSelectedMembers } = useSettingsStore()
+  const achievements = useAchievementStore(state => state.achievements)
   const activeBugCount = bugs.filter(b => b.status === 'active').length
   const [showMemberPicker, setShowMemberPicker] = useState(false)
+  const [showAchievements, setShowAchievements] = useState(false)
   const [memberSearch, setMemberSearch] = useState('')
+  const [selectedBugId, setSelectedBugId] = useState<number | null>(null)
+  const unlockedCount = achievements.filter(a => a.unlocked).length
 
   useZentao()
 
@@ -30,9 +38,9 @@ export default function BugDashboard() {
     })
 
   return (
-    <div className="h-full flex flex-col p-3">
+    <div className="h-full flex flex-col">
       {/* 顶部简洁信息栏 */}
-      <div className="flex items-center justify-between mb-2 flex-shrink-0">
+      <div className="flex items-center justify-between px-3 py-1.5 flex-shrink-0">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-textPrimary">Bug 监控</span>
           <StatusDot status={connectionStatus} />
@@ -41,10 +49,46 @@ export default function BugDashboard() {
           <span className="text-sm font-bold" style={{ color: activeBugCount <= 3 ? '#00ff88' : activeBugCount <= 7 ? '#ff6b35' : '#ff4444' }}>
             {activeBugCount} 个活跃Bug
           </span>
+          {/* 成就按钮 */}
+          <div className="relative">
+            <button
+              className="relative text-sm hover:scale-110 transition-transform"
+              onClick={() => { setShowAchievements(!showAchievements); setShowMemberPicker(false) }}
+            >
+              🏆
+              {unlockedCount > 0 && (
+                <span className="absolute -top-1 -right-2 bg-yellow-500 text-white text-[9px] rounded-full w-3.5 h-3.5 flex items-center justify-center">
+                  {unlockedCount}
+                </span>
+              )}
+            </button>
+            {showAchievements && (
+              <div className="absolute top-7 right-0 bg-[#1a1a2e] border border-white/10 rounded-lg p-3 w-64 z-50 shadow-xl">
+                <div className="text-sm font-bold text-yellow-400 mb-2">🏆 成就</div>
+                {achievements.map(a => (
+                  <div key={a.id} className="flex items-center gap-2 py-1 text-xs">
+                    <span className="text-base">{a.unlocked ? a.icon : '❓'}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className={a.unlocked ? 'text-white' : 'text-gray-500'}>
+                        {a.unlocked ? a.name : '???'}
+                      </div>
+                      {a.unlocked ? (
+                        <div className="text-gray-400 truncate">{a.description}</div>
+                      ) : a.target ? (
+                        <div className="w-full bg-gray-700 rounded-full h-1.5 mt-0.5">
+                          <div className="bg-yellow-500 h-1.5 rounded-full" style={{ width: `${((a.progress || 0) / a.target) * 100}%` }} />
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           {/* 同事选择按钮 */}
           <div className="relative">
             <button
-              onClick={() => setShowMemberPicker(!showMemberPicker)}
+              onClick={() => { setShowMemberPicker(!showMemberPicker); setShowAchievements(false) }}
               className="text-xs text-textSecondary hover:text-[#00ff88] transition-colors"
             >
               👥 选择同事{selectedMembers.length > 0 && ` (${selectedMembers.length})`}
@@ -125,12 +169,26 @@ export default function BugDashboard() {
               </div>
             )}
           </div>
+          {/* 窗口控制按钮 */}
+          <WindowControls />
         </div>
       </div>
 
-      {/* 像素办公室 - 占据几乎全部空间 */}
-      <div className="flex-1 rounded-xl overflow-hidden border border-white/5 bg-[rgba(30,30,60,0.4)]">
+      {/* 上半部：像素办公室场景 */}
+      <div className="h-[50%] min-h-[200px] rounded-xl overflow-hidden border border-white/5 bg-[rgba(30,30,60,0.4)] mx-2">
         <PixelScene />
+      </div>
+
+      {/* 下半部：Bug面板区域 - 左右分栏 */}
+      <div className="flex-1 flex gap-2 px-2 pb-2 min-h-0">
+        {/* 左侧：Bug列表 */}
+        <div className="w-[45%] rounded-xl bg-[rgba(30,30,60,0.6)] backdrop-blur-md border border-white/5 overflow-hidden">
+          <BugListPanel selectedBugId={selectedBugId} onSelectBug={setSelectedBugId} />
+        </div>
+        {/* 右侧：Bug详情 */}
+        <div className="flex-1 rounded-xl bg-[rgba(30,30,60,0.6)] backdrop-blur-md border border-white/5 overflow-hidden">
+          <BugDetailPanel bugId={selectedBugId} onClose={() => setSelectedBugId(null)} />
+        </div>
       </div>
     </div>
   )

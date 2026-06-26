@@ -1,9 +1,45 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { useBugStore } from '../../stores/bugStore'
 import { useSettingsStore } from '../../stores/settingsStore'
+import { useAchievementStore } from '../../stores/achievementStore'
 import { PixelAnimator, getStateFromBugCount, TeamMemberData } from './animator'
+// import { initSprites } from './spriteLoader' // 禁用精灵图
 import { TeamMember } from '../../types'
 
+// === Speech Bubble Types ===
+interface SpeechBubble {
+  id: string
+  targetName: string
+  text: string
+  type: 'bug' | 'status' | 'system' | 'chat'
+  createdAt: number
+  duration: number
+}
+
+const BUBBLE_TEXTS = {
+  bug: ['又有Bug了...', '这Bug怎么回事', '又来活了...', '有新的Bug提醒！'],
+  status: ['搞定！', '终于修好了', '这代码真优雅！', 'LGTM!'],
+  system: ['需要咖啡续命...', '快下班了...', '让我想想...', '服务器内存告警！'],
+  chat: ['今天加班吗？', '代码改变世界', '测试环境发现3个Bug', '需求又变了...'],
+}
+
+const BUBBLE_TEXT_COLORS: Record<SpeechBubble['type'], string> = {
+  bug: 'text-red-400',
+  status: 'text-[#00ff88]',
+  system: 'text-yellow-400',
+  chat: 'text-white',
+}
+
+const MAX_BUBBLES = 3
+
+let bubbleIdCounter = 0
+function nextBubbleId(): string {
+  bubbleIdCounter++
+  return `bubble_${bubbleIdCounter}_${Date.now()}`
+}
+
+// === Label Position Interface ===
 interface LabelPosition {
   x: number
   y: number
@@ -12,10 +48,20 @@ interface LabelPosition {
   isCurrentUser?: boolean
 }
 
+// === Context Menu Interface ===
+interface ContextMenuState {
+  x: number
+  y: number
+  memberIndex: number
+  memberName: string
+}
+
 export default function PixelScene() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const animatorRef = useRef<PixelAnimator | null>(null)
   const labelTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const bubbleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const bubbleCleanupRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const bugs = useBugStore(state => state.bugs)
   const connectionStatus = useBugStore(state => state.connectionStatus)
@@ -26,15 +72,43 @@ export default function PixelScene() {
   const isInitialLoadRef = useRef(true)
 
   const [labelPositions, setLabelPositions] = useState<LabelPosition[]>([])
+  const [bubbles, setBubbles] = useState<SpeechBubble[]>([])
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+
+  // Achievement store
+  const incrementWhipCount = useAchievementStore(state => state.incrementWhipCount)
+  const incrementCatPet = useAchievementStore(state => state.incrementCatPet)
+  const addUsageMinute = useAchievementStore(state => state.addUsageMinute)
+  const updateZeroBugTime = useAchievementStore(state => state.updateZeroBugTime)
+  const checkAndUnlock = useAchievementStore(state => state.checkAndUnlock)
+
+  // === Bubble Management ===
+  const addBubble = useCallback((targetName: string, type: SpeechBubble['type'], text?: string) => {
+    const texts = BUBBLE_TEXTS[type]
+    const bubbleText = text || texts[Math.floor(Math.random() * texts.length)]
+    const duration = 3000 + Math.random() * 2000 // 3-5 seconds
+
+    setBubbles(prev => {
+      // Limit max bubbles
+      const updated = prev.length >= MAX_BUBBLES ? prev.slice(1) : [...prev]
+      updated.push({
+        id: nextBubbleId(),
+        targetName,
+        text: bubbleText,
+        type,
+        createdAt: Date.now(),
+        duration,
+      })
+      return updated
+    })
+  }, [])
 
   // 根据 selectedMembers 过滤显示的成员（始终保留当前用户）
   const getDisplayMembers = useCallback((): TeamMember[] => {
     if (teamMembers.length === 0) return []
     if (selectedMembers.length === 0) {
-      // 用户还没选，显示全部（或bug最多的10人）
       return teamMembers.slice(0, 10)
     }
-    // 显示用户勾选的同事 + 始终保留当前用户
     return teamMembers.filter(m =>
       m.isCurrentUser || selectedMembers.includes(m.account || m.name)
     ).slice(0, 10)
@@ -55,6 +129,11 @@ export default function PixelScene() {
     setLabelPositions(positions)
   }, [])
 
+  // 禁用精灵图，使用增强版程序化渲染
+  // useEffect(() => {
+  //   initSprites()
+  // }, [])
+
   // 初始化 Canvas 和动画器
   useEffect(() => {
     const canvas = canvasRef.current
@@ -74,11 +153,10 @@ export default function PixelScene() {
         isCurrentUser: m.isCurrentUser || false,
       }))
       animator.setTeamMembers(memberData)
-      // 延迟更新标签位置（等 animator 计算完）
       setTimeout(updateLabelPositions, 100)
     }
 
-    // 定时更新标签位置（跟随动画帧率）
+    // 定时更新标签位置
     labelTimerRef.current = setInterval(updateLabelPositions, 500)
 
     return () => {
@@ -91,12 +169,45 @@ export default function PixelScene() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // === 气泡定时器：随机chat气泡 + 过期清理 ===
+  useEffect(() => {
+    // 随机触发 chat 气泡（30-60秒间隔）
+    const scheduleNextChat = () => {
+      const delay = 30000 + Math.random() * 30000
+      bubbleTimerRef.current = setTimeout(() => {
+        const displayMembers = getDisplayMembers()
+        if (displayMembers.length > 0) {
+          const randomMember = displayMembers[Math.floor(Math.random() * displayMembers.length)]
+          addBubble(randomMember.name, 'chat')
+        }
+        scheduleNextChat()
+      }, delay)
+    }
+    scheduleNextChat()
+
+    // 定期清理过期气泡
+    bubbleCleanupRef.current = setInterval(() => {
+      const now = Date.now()
+      setBubbles(prev => prev.filter(b => now - b.createdAt < b.duration))
+    }, 500)
+
+    return () => {
+      if (bubbleTimerRef.current) {
+        clearTimeout(bubbleTimerRef.current)
+        bubbleTimerRef.current = null
+      }
+      if (bubbleCleanupRef.current) {
+        clearInterval(bubbleCleanupRef.current)
+        bubbleCleanupRef.current = null
+      }
+    }
+  }, [getDisplayMembers, addBubble])
+
   // 当团队成员数据或勾选变化时更新动画器
   useEffect(() => {
     if (!animatorRef.current) return
     const displayMembers = getDisplayMembers()
     if (displayMembers.length > 0) {
-      // 获取当前用户名，标记isCurrentUser
       const api = (window as unknown as { electronAPI?: { storeGet?: (key: string) => Promise<unknown> } }).electronAPI
       const setMembers = (currentUsername: string) => {
         const memberData: TeamMemberData[] = displayMembers.map(m => ({
@@ -105,7 +216,6 @@ export default function PixelScene() {
           isCurrentUser: !!(currentUsername && (m.name === currentUsername || m.account === currentUsername)),
         }))
         animatorRef.current?.setTeamMembers(memberData)
-        // 立即更新一次 + 延迟再更新一次（等 animator 计算完位置）
         updateLabelPositions()
         setTimeout(updateLabelPositions, 100)
       }
@@ -117,42 +227,83 @@ export default function PixelScene() {
         setMembers('')
       }
     } else {
-      // 清空显示
       animatorRef.current?.setTeamMembers([])
       updateLabelPositions()
     }
   }, [teamMembers, selectedMembers, getDisplayMembers, updateLabelPositions])
 
-  // 当Bug数量变化时更新角色状态（真实数据模式）
+  // 当Bug数量变化时更新角色状态
   useEffect(() => {
     if (!animatorRef.current) return
     const newState = getStateFromBugCount(activeBugCount)
     animatorRef.current.setState(newState)
   }, [activeBugCount])
 
-  // 检测团队成员的bug数增加触发老板动画
+  // === Canvas点击事件：点击同事弹出操作菜单，点击猫撸猫 ===
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!canvasRef.current || !animatorRef.current) return
+
+    const rect = canvasRef.current.getBoundingClientRect()
+    // 将页面坐标转换为canvas逻辑坐标
+    const scaleX = 700 / rect.width
+    const scaleY = 350 / rect.height
+    const canvasX = (e.clientX - rect.left) * scaleX
+    const canvasY = (e.clientY - rect.top) * scaleY
+
+    // 检测是否点击了猫
+    const catPos = animatorRef.current.getCatPosition()
+    if (catPos && Math.abs(canvasX - catPos.x) < 15 && Math.abs(canvasY - catPos.y) < 15) {
+      animatorRef.current.triggerPetCat()
+      incrementCatPet()
+      setContextMenu(null)
+      return
+    }
+
+    // 让animator检测点击了哪个成员
+    const clickedMemberIndex = animatorRef.current.getMemberAtPosition(canvasX, canvasY)
+    if (clickedMemberIndex >= 0) {
+      const displayMembers = getDisplayMembers()
+      // 弹出菜单而不是直接抽打
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        memberIndex: clickedMemberIndex,
+        memberName: displayMembers[clickedMemberIndex]?.name || '同事'
+      })
+    } else {
+      setContextMenu(null) // 点击空白处关闭菜单
+    }
+  }, [getDisplayMembers, incrementCatPet])
+
+  // 检测团队成员的bug数增加触发老板动画 + 气泡 + 特效
   useEffect(() => {
     if (!animatorRef.current) return
     if (teamMembers.length === 0) return
 
-    // 跳过首次加载（避免初始数据触发）
+    // 跳过首次加载
     if (isInitialLoadRef.current) {
       isInitialLoadRef.current = false
       prevTeamMembersRef.current = [...teamMembers]
       return
     }
 
-    // 对比上次的 teamMembers 和这次的
-    // 找出哪些人的 bugCount 增加了
     const prevMembers = prevTeamMembersRef.current
     if (prevMembers.length > 0) {
       const displayMembers = getDisplayMembers()
+
+      // 检测bug增加的成员
       const increased = displayMembers.filter(m => {
         const prev = prevMembers.find(pm => (pm.account || pm.name) === (m.account || m.name))
         return prev && m.bugCount > prev.bugCount
       })
+
+      // 检测bug减少的成员（修复了bug）
+      const decreased = displayMembers.filter(m => {
+        const prev = prevMembers.find(pm => (pm.account || pm.name) === (m.account || m.name))
+        return prev && m.bugCount < prev.bugCount
+      })
+
       if (increased.length > 0) {
-        // 触发老板动画，目标是bug增加最多的那个人
         const target = increased.sort((a, b) => {
           const prevA = prevMembers.find(pm => (pm.account || pm.name) === (a.account || a.name))
           const prevB = prevMembers.find(pm => (pm.account || pm.name) === (b.account || b.name))
@@ -160,15 +311,36 @@ export default function PixelScene() {
           const deltaB = b.bugCount - (prevB?.bugCount || 0)
           return deltaB - deltaA
         })[0]
+
         console.log('[PixelScene] 检测到成员bug增加, 触发老板动画, 目标:', target.name)
         animatorRef.current.triggerBoss(target.name)
 
-        // 发送系统通知
-        if (window.electronAPI?.zentaoShowBugNotification) {
+        // 对每个bug增加的成员，触发指派动画
+        increased.forEach(member => {
+          const prevMember = prevMembers.find(pm => (pm.account || pm.name) === (member.account || member.name))
+          if (prevMember) {
+            // 找出新指派的bug
+            const newBugs = member.bugs.filter(b =>
+              !prevMember.bugs.some(pb => String(pb.id) === String(b.id))
+            )
+            if (newBugs.length > 0) {
+              // 触发 assign 动画（文件飘落效果）
+              animatorRef.current!.triggerEffectAtMember('assign', member.name)
+            }
+          }
+          // 触发 bugAppear 特效
+          animatorRef.current!.triggerEffectAtMember('bugAppear', member.name)
+          // 触发 bug 气泡
+          addBubble(member.name, 'bug')
+        })
+
+        // 发送系统通知（仅当登录用户自己有新Bug时才弹出提醒）
+        const currentUser = increased.find(m => m.isCurrentUser)
+        if (currentUser && window.electronAPI?.zentaoShowBugNotification) {
           const prevMember = prevMembers.find(pm =>
-            (pm.account || pm.name) === (target.account || target.name)
+            (pm.account || pm.name) === (currentUser.account || currentUser.name)
           )
-          const newBugs = target.bugs.filter(b =>
+          const newBugs = currentUser.bugs.filter(b =>
             !prevMember?.bugs.some(pb => String(pb.id) === String(b.id))
           )
 
@@ -176,35 +348,106 @@ export default function PixelScene() {
             const newBug = newBugs[0]
             window.electronAPI.zentaoShowBugNotification({
               title: `🐛 新Bug: ${newBug.title}`,
-              body: `指派给: ${target.name} | 严重程度: ${newBug.severity || '未知'}`,
+              body: `指派给: ${currentUser.name} | 严重程度: ${newBug.severity || '未知'}`,
               bugId: newBug.id,
             })
           } else {
             window.electronAPI.zentaoShowBugNotification({
-              title: `🐛 ${target.name} 有新Bug`,
-              body: `当前活跃Bug数: ${target.bugCount}`,
+              title: `🐛 ${currentUser.name} 有新Bug`,
+              body: `当前活跃Bug数: ${currentUser.bugCount}`,
               bugId: null,
             })
           }
         }
       }
+
+      // Bug修复 → 显示 status 气泡
+      if (decreased.length > 0) {
+        const fixer = decreased[0]
+        addBubble(fixer.name, 'status')
+        animatorRef.current.triggerEffectAtMember('complete', fixer.name)
+      }
     }
 
     prevTeamMembersRef.current = [...teamMembers]
-  }, [teamMembers, getDisplayMembers])
+  }, [teamMembers, getDisplayMembers, addBubble])
+
+  // === 成就检查定时器：每分钟检查一次 ===
+  useEffect(() => {
+    const interval = setInterval(() => {
+      addUsageMinute()
+      const hasActiveBugs = teamMembers.some(m => m.bugCount > 0)
+      updateZeroBugTime(hasActiveBugs)
+      const newAchievement = checkAndUnlock()
+      if (newAchievement && animatorRef.current) {
+        animatorRef.current.triggerAchievementUnlock(newAchievement.name)
+      }
+    }, 60000)
+    return () => clearInterval(interval)
+  }, [teamMembers, addUsageMinute, updateZeroBugTime, checkAndUnlock])
 
   return (
     <div className="relative w-full h-full">
-      {/* Canvas像素场景 - 始终渲染以确保 animator 正确初始化 */}
+      {/* Canvas像素场景 */}
       <canvas
         ref={canvasRef}
         width={700}
         height={350}
         className="w-full h-full"
-        style={{ imageRendering: 'pixelated' }}
+        onClick={handleCanvasClick}
+        style={{ cursor: 'pointer', imageRendering: 'pixelated' }}
       />
 
-      {/* 没有数据时显示等待界面（覆盖在canvas上方） */}
+      {/* 右键菜单（点击同事后弹出） */}
+      {contextMenu && (
+        <div
+          className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl z-50 py-1 min-w-[120px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-700">
+            {contextMenu.memberName}
+          </div>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-red-400"
+            onClick={() => {
+              animatorRef.current?.triggerUserWhip(contextMenu.memberIndex)
+              incrementWhipCount()
+              setContextMenu(null)
+            }}
+          >
+            🔥 鞭策一下
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-green-400"
+            onClick={() => {
+              animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'coffee')
+              setContextMenu(null)
+            }}
+          >
+            ☕ 投喂咖啡
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-yellow-400"
+            onClick={() => {
+              animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'snack')
+              setContextMenu(null)
+            }}
+          >
+            🍪 投喂零食
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm hover:bg-gray-700 text-blue-400"
+            onClick={() => {
+              animatorRef.current?.triggerFeedMember(contextMenu.memberIndex, 'energy')
+              setContextMenu(null)
+            }}
+          >
+            ⚡ 能量饮料
+          </button>
+        </div>
+      )}
+
+      {/* 没有数据时显示等待界面 */}
       {teamMembers.length === 0 && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1a1a2e]/90 z-10">
           <div className="text-4xl mb-4">🏢</div>
@@ -254,6 +497,51 @@ export default function PixelScene() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* 对话气泡覆盖层 */}
+      {teamMembers.length > 0 && (
+        <div className="absolute inset-0 pointer-events-none z-20">
+          <AnimatePresence>
+            {bubbles.map(bubble => {
+              const animator = animatorRef.current
+              if (!animator) return null
+              const members = animator.getDisplayMembers()
+              const memberIndex = members.findIndex(m => m.name === bubble.targetName)
+              const pos = memberIndex >= 0 ? animator.getMemberLabelPosition(memberIndex) : null
+              if (!pos) return null
+
+              return (
+                <motion.div
+                  key={bubble.id}
+                  initial={{ opacity: 0, scale: 0.8, y: 5 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.8, y: -5 }}
+                  transition={{ duration: 0.25, ease: 'easeOut' }}
+                  className="absolute"
+                  style={{
+                    left: `${(pos.x / 700) * 100}%`,
+                    top: `${((pos.y - 28) / 350) * 100}%`,
+                    transform: 'translateX(-50%)',
+                  }}
+                >
+                  <div className={`relative bg-[rgba(20,20,40,0.9)] backdrop-blur-sm rounded-lg px-3 py-1.5 border border-white/10 text-xs max-w-[150px] whitespace-nowrap ${BUBBLE_TEXT_COLORS[bubble.type]}`}>
+                    {bubble.text}
+                    {/* 底部小三角 */}
+                    <div
+                      className="absolute left-1/2 -translate-x-1/2 bottom-[-6px] w-0 h-0"
+                      style={{
+                        borderLeft: '4px solid transparent',
+                        borderRight: '4px solid transparent',
+                        borderTop: '6px solid rgba(20,20,40,0.9)',
+                      }}
+                    />
+                  </div>
+                </motion.div>
+              )
+            })}
+          </AnimatePresence>
         </div>
       )}
     </div>

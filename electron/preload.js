@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   zentaoGetAllBugs: () => ipcRenderer.invoke('zentao:getAllBugs'),
   zentaoDisconnect: () => ipcRenderer.invoke('zentao:disconnect'),
   zentaoGetProductList: () => ipcRenderer.invoke('zentao:getProductList'),
+  zentaoAssignBug: (bugId, assignedTo) => ipcRenderer.invoke('zentao:assignBug', bugId, assignedTo),
 
   // Store
   storeGet: (key) => ipcRenderer.invoke('store:get', key),

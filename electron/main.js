@@ -273,6 +273,24 @@ ipcMain.handle('zentao:getProductList', async () => {
   }
 });
 
+ipcMain.handle('zentao:assignBug', async (event, bugId, assignedTo) => {
+  if (!zentaoApi) {
+    return { success: false, error: '未连接禅道' };
+  }
+  try {
+    const result = await zentaoApi.assignBug(bugId, assignedTo);
+
+    // 转指派成功后立即刷新Bug列表
+    if (result.success) {
+      fetchBugs();
+    }
+
+    return result;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 // IPC处理 - electron-store
 ipcMain.handle('store:get', (event, key) => {
   return store.get(key, null);

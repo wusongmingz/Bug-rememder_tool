@@ -1,0 +1,4 @@
+# Sprite Assets Directory
+# Place sprite sheet PNG files here.
+# They will be imported via Vite's asset handling.
+# Main sprite sheet: programmer-sprites.png (to be added)
